@@ -83,51 +83,39 @@ them for details; these don't tell you what N (or whether it's even the right
 knob) should be, that's still yours to figure out and justify.
 
 ```bash
-python 01_lab_counters.py   # $inc (atomic increment of a field) under concurrent load -- document what's happening and what would fix it
-```
-
-Optional: `python 01_lab_counters.py --docs N` -- spread the same workload
-across N documents.
-
-```bash
-python 02_lab_devices.py   # $push (append to an array field) -- diagnose and fix the latency yourself
-```
-
-Optional: `python 02_lab_devices.py --test-sizes 50,500,5000` -- measure
-specific array lengths.
-
-```bash
-python 03_lab_events.py   # inserts into lab_events -- diagnose and fix the _id strategy yourself
-```
-
-Optional: `python 03_lab_events.py --shard-prefixes N` -- a third key
-strategy, N possible prefixes.
-
-```bash
-python 04_inefficient_compound_fields.py   # explain() for a common query -- diagnose and fix the indexing yourself
+python 01_lab_counters.py   # $inc (atomic increment of a field) under concurrent load -- diagnose and document what's happening and what would fix it
+python 01_lab_counters.py --docs N   # optional: spread the same workload across N documents
 ```
 
 ```bash
-python 05_lab_traffic_scratch.py   # a sudden concurrency spike vs. the same load ramped up in stages
+python 02_lab_devices.py   # $push (append to an array field) -- diagnose and document what's happening and what would fix it
+python 02_lab_devices.py --test-sizes 50,500,5000   # optional: measure specific array lengths
 ```
-
-Optional: `python 05_lab_traffic_scratch.py --mode reads` -- same
-spike-vs-ramp comparison, with reads.
 
 ```bash
-python 06_large_reads_pagination.py   # fetching a whole collection at once vs. in pages
+python 03_lab_events.py   # inserts into lab_events -- diagnose and document what's happening and what would fix it
+python 03_lab_events.py --shard-prefixes N   # optional: a third key strategy, N possible prefixes
 ```
-
-Optional: `python 06_large_reads_pagination.py --pagination keyset` -- a
-keyset cursor instead of skip/limit. `--page-size N` tunes the page size for
-either.
 
 ```bash
-python 07_batch_vs_bulk_writes.py   # serial vs. batched (at a few sizes) vs. parallel individual writes
+python 04_inefficient_compound_fields.py   # explain() for a common query -- diagnose and document what's happening and what would fix it
 ```
 
-Optional: `python 07_batch_vs_bulk_writes.py --batch-sizes 5,50,1000` --
-your own set of batch sizes.
+```bash
+python 05_lab_traffic_scratch.py   # a sudden concurrency spike vs. the same load ramped up in stages -- diagnose and document what's happening and what would fix it
+python 05_lab_traffic_scratch.py --mode reads   # optional: same spike-vs-ramp comparison, with reads
+```
+
+```bash
+python 06_large_reads_pagination.py   # fetching a whole collection at once vs. in pages -- diagnose and document what's happening and what would fix it
+python 06_large_reads_pagination.py --pagination keyset   # optional: a keyset cursor instead of skip/limit
+python 06_large_reads_pagination.py --page-size N           # optional: tunes the page size for either
+```
+
+```bash
+python 07_batch_vs_bulk_writes.py   # serial vs. batched (at a few sizes) vs. parallel individual writes -- diagnose and document what's happening and what would fix it
+python 07_batch_vs_bulk_writes.py --batch-sizes 5,50,1000   # optional: your own set of batch sizes
+```
 
 Use the worksheet below to track what you find before you jump to this
 guide's AI-assistant prompts or `FACILITATOR_GUIDE.md` -- the goal is your
