@@ -265,13 +265,29 @@ don't match — see the region note under "Fast path" above.
 (the operator that atomically increments a numeric field) by many
 concurrent callers (e.g. a naive global page-view counter).
 
-**Symptom (`01_lab_counters.py`):** 20 concurrent writers doing
-100 total `$inc` ops against one shared document show materially worse tail
-latency and lower throughput than the same 100 ops spread across 20 documents
-(measured: ~95ms p50 / 249ms max / 194 ops/sec hot vs. ~14ms p50 / 317ms max /
-311 ops/sec cold — the hot case's *median* moves a lot even though max latency
-is noisy at this sample size). Firestore serializes writes to a single
-document; concurrent writers queue behind each other.
+**Symptom (`01_lab_counters.py`):** the script now reports only the median
+(p50) latency per scenario, on purpose — it used to also show wall-clock,
+max, and ops/sec, but those turned out to be routinely dominated by a single
+outlier op unrelated to contention (see caveat below), which buried the
+actual signal. Median still shows it clearly: 20 concurrent writers doing
+100 total `$inc` ops against one shared document run materially slower than
+the same 100 ops spread across 20 documents (measured: ~95ms hot vs. ~14ms
+cold). Firestore serializes writes to a single document; concurrent writers
+queue behind each other.
+
+**Caveat worth knowing before a trainee asks about it:** the COLD scenario
+reproducibly shows one very slow op (~5.0-5.1s, essentially the same value
+across repeated runs, not random noise) that used to dominate the old
+wall-clock/max columns while never showing up as an error (writes still
+succeed) or moving the median. Leading theory, not yet fully confirmed:
+`run_spread()` always executes before `run_hot()` in a fresh process, so
+whichever scenario runs first likely eats a one-time pymongo connection-pool
+growth cost (the client going from a handful of sockets up to
+`WRITERS`-many concurrent ones for the first time) — that would land on
+COLD by construction, regardless of anything about contention. If a trainee
+reports this, it's a legitimate observation worth discussing, not a sign
+their measurement is broken; median is what the lab's actual comparison
+rests on, precisely because it isn't sensitive to this kind of one-off.
 
 **Fix:** shard the counter. Maintain N separate shard documents (e.g.
 `global_stats_shard_0..9`), write to a randomly chosen shard per increment,
@@ -298,10 +314,12 @@ retries internally, and if it can't get a clean commit it hard-fails with
 `ABORTED: Too much contention on these documents`. Since `retryWrites=false`
 is required on this connection, the driver never auto-retries that (or any
 transient failure) — the app must. `01_lab_counters.py` now
-catches and counts these (an `Errors` column) instead of crashing on the
-first one; at this lab's default concurrency (20 writers × 5 ops) the
-backend's internal retries absorb the contention and no errors surface —
-push `WRITERS`/`OPS_PER_WRITER` higher to see the abort rate climb.
+catches and counts these instead of crashing on the first one, and calls
+them out explicitly (only when they actually happen, not as a permanent
+column) since that's a real result, not noise; at this lab's default
+concurrency (20 writers × 5 ops) the backend's internal retries absorb the
+contention and no errors surface — push `WRITERS`/`OPS_PER_WRITER` higher to
+see the abort rate climb.
 
 **Nudge, don't tell:** `--docs N` spreads the same total workload across N
 documents (N=1 reproduces HOT, N=20 reproduces COLD) without the script
