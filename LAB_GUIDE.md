@@ -14,6 +14,19 @@ Your task: for each anti-pattern, use an AI assistant (and the tools below) to
 
 No answer key is included here on purpose — that's the exercise.
 
+**Run this lab from the same region as the database.** Cross-region calls
+add real latency to every query, on top of whatever anti-pattern you're
+trying to measure -- `provision_lab.py` will warn you if the two don't
+match. To check which region this machine is in yourself (only works on a
+GCE VM or Cloud Shell):
+
+```bash
+curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone
+```
+
+The response looks like `projects/123456789/zones/us-west1-b` -- the region
+is everything before the last `-` (`us-west1` here).
+
 ## Connecting
 
 **Prerequisites:** Python 3.9+. Everything else below sets that up into an
