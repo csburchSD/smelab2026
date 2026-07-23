@@ -106,6 +106,20 @@ generated password. Use `--dry-run` to see the plan without touching
 anything, or `--database-id`/`--location`/`--user-id` to override the
 defaults. Run `python provision_lab.py --help` for details.
 
+**Region matters here — same-region scripts and database is not optional.**
+If `--location` isn't given, `provision_lab.py` tries the GCE metadata
+server to detect the region this machine is actually running in and uses
+that as the default instead of a hardcoded location; it falls back to
+`us-west1` only if metadata isn't reachable (e.g. a trainee's own laptop,
+not a GCE VM). Either way, if the machine's detected region and the
+database's region don't match — an explicit `--location` override, or
+reusing an existing database created elsewhere — it prints a warning
+explaining the cross-region latency cost and folds a confirmation into the
+usual resource-creation prompt before proceeding. `--check` (including via
+the interactive menu's "Check connection" option) runs the same comparison
+against whatever `.env` already points at, so a trainee who inherited
+someone else's `.env` gets warned too, not just at provisioning time.
+
 Expect it to pause for a bit in two places -- this is normal, not a hang:
 waiting up to ~2 minutes for the new IAM binding to propagate before it'll
 confirm write access, and (if reusing a `--database-id` that was decommissioned
@@ -134,7 +148,11 @@ gcloud firestore databases create \
 ```
 
 (`YOUR_LOCATION` is a Firestore location such as `us-west1` — see
-`gcloud firestore databases create --help` for the full list.)
+`gcloud firestore databases create --help` for the full list. Pick one that
+matches the region the lab scripts will actually run from; the manual path
+has no equivalent of the fast path's region auto-detection/mismatch
+warning, so a wrong choice here fails silently as elevated latency, not an
+error.)
 
 ### 5. Create a SCRAM user and grant it IAM data access
 
@@ -234,7 +252,10 @@ or stale.
 python provision_lab.py --check
 ```
 
-should report the four seeded `lab_` collections with no errors.
+should report the four seeded `lab_` collections with no errors. It also
+compares the database's region (parsed out of `.env`'s `MONGO_URI`) against
+the region this machine is detected to be running in, and warns if they
+don't match — see the region note under "Fast path" above.
 
 ---
 
