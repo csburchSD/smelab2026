@@ -94,6 +94,21 @@ def run_scenario(coll, id_factory):
     return latencies, wall
 
 
+def warm_up(coll):
+    """This backend (or something about this environment) pays a fixed ~5s
+    cost on one op each, on exactly the first two concurrent bursts of a
+    fresh process -- observed directly: reproducible across separate runs,
+    hits every scenario equally regardless of _id strategy or contention
+    (RANDOM has neither and still shows it), and a third burst in the same
+    process is consistently clean. Two untimed throwaway bursts here absorb
+    that before any labeled scenario is measured, so SEQUENTIAL/RANDOM/SALTED
+    are all compared on equal footing instead of whichever ones happen to
+    run first paying a cost the others don't."""
+    for _ in range(2):
+        run_scenario(coll, lambda: str(uuid.uuid4()))
+    coll.delete_many({})
+
+
 def summarize(name, latencies, wall):
     ms = sorted(l * 1000 for l in latencies)
     return {
@@ -119,6 +134,7 @@ def main():
         scenarios.append((f"SALTED ({args.shard_prefixes} prefixes)", make_salted_id_factory(args.shard_prefixes)))
 
     coll.delete_many({})
+    warm_up(coll)
     rows = []
     for label, id_factory in scenarios:
         console.print(f"Inserting {WRITERS * OPS_PER_WRITER} docs with {label} "
