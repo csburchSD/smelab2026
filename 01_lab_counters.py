@@ -120,29 +120,34 @@ def summarize(name, results, wall):
         "ops": len(results),
         "errors": errors,
         "wall_s": round(wall, 3),
-        "p50_ms": round(statistics.median(ms), 1) if ms else float("nan"),
-        "p95_ms": round(ms[int(len(ms) * 0.95) - 1], 1) if ms else float("nan"),
-        "max_ms": round(ms[-1], 1) if ms else float("nan"),
-        "ops_per_sec": round(len(ms) / wall, 1),
+        "median_ms": round(statistics.median(ms), 1) if ms else float("nan"),
     }
 
 
 def print_table(rows):
-    table = Table(title="$inc latency")
+    table = Table(title="$inc: typical (median) time for one operation")
     table.add_column("Scenario")
-    table.add_column("Ops", justify="right")
-    table.add_column("Errors", justify="right")
-    table.add_column("Wall (s)", justify="right")
-    table.add_column("p50 (ms)", justify="right")
-    table.add_column("p95 (ms)", justify="right")
-    table.add_column("max (ms)", justify="right")
-    table.add_column("ops/sec", justify="right")
+    table.add_column("Median $inc (ms)", justify="right")
 
     for row in rows:
-        table.add_row(row["scenario"], str(row["ops"]), str(row["errors"]), str(row["wall_s"]),
-                      str(row["p50_ms"]), str(row["p95_ms"]), str(row["max_ms"]),
-                      str(row["ops_per_sec"]))
+        table.add_row(row["scenario"], str(row["median_ms"]))
     console.print(table)
+
+    console.print(
+        "\n[dim]Median (p50): half of all $inc calls in this scenario finished faster "
+        "than this, half slower -- it's what a typical call actually costs. A wall-clock "
+        "total or a max/average can be dominated by one unusually slow call without that "
+        "reflecting the typical cost at all, which is why that's not what's shown here.[/]"
+    )
+
+    for row in rows:
+        if row["errors"]:
+            console.print(
+                f"[red]{row['scenario']}: {row['errors']} of {row['ops']} calls failed "
+                "after exhausting retries (retryWrites=false means the driver won't retry "
+                "them for you) -- too much contention to commit. That's a real result, "
+                "not noise.[/]"
+            )
 
 
 def main():
@@ -157,10 +162,6 @@ def main():
                       f"against {args.docs} document(s)...\n")
         results, wall = run_spread(db, args.docs)
         print_table([summarize(f"{args.docs} doc(s)", results, wall)])
-        console.print(
-            "\n[dim]Errors = writes that failed after exhausting retries "
-            "(retryWrites=false means the driver won't retry them for you).[/]"
-        )
         return
 
     console.print(f"[dim]Collections: {db.name}.lab_counters_experiment (scratch COLD docs, "
@@ -178,9 +179,11 @@ def main():
     print_table([summarize("COLD (20 docs)", cold_lat, cold_wall),
                  summarize("HOT (1 doc)", hot_lat, hot_wall)])
     console.print(
-        "\n[dim]Same total work, same cluster. Errors = writes that failed after "
-        "exhausting retries (retryWrites=false means the driver won't retry them "
-        "for you). Try `--docs N` for values between 1 and 20 to explore further.[/]"
+        "\n[dim]Same total work, same cluster, split two different ways. Try `--docs N` "
+        "for values between 1 and 20 to explore further.[/]\n"
+        "\nDocument what you're seeing -- which scenario's typical `$inc` costs more, and "
+        "roughly by how much -- and what you think would fix it. You don't need to "
+        "implement the fix to answer that."
     )
 
 

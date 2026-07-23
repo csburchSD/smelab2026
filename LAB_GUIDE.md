@@ -83,7 +83,7 @@ them for details; these don't tell you what N (or whether it's even the right
 knob) should be, that's still yours to figure out and justify.
 
 ```bash
-python 01_lab_counters.py   # $inc (atomic increment of a field) under concurrent load -- diagnose and fix the contention yourself
+python 01_lab_counters.py   # $inc (atomic increment of a field) under concurrent load -- document what's happening and what would fix it
 ```
 
 Optional: `python 01_lab_counters.py --docs N` -- spread the same workload
