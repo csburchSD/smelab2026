@@ -118,18 +118,29 @@ def run_ramp(db, mode):
     return results, wall
 
 
-def summarize(name, results, wall):
+def summarize(name, results, wall, concurrency):
     ms = sorted(latency * 1000 for latency, ok in results if ok)
     errors = sum(1 for _, ok in results if not ok)
+    p95 = ms[int(len(ms) * 0.95) - 1] if ms else float("nan")
     return {
         "scenario": name,
         "ops": len(results),
         "errors": errors,
         "wall_s": round(wall, 3),
         "p50_ms": round(statistics.median(ms), 1) if ms else float("nan"),
-        "p95_ms": round(ms[int(len(ms) * 0.95) - 1], 1) if ms else float("nan"),
+        "p95_ms": round(p95, 1) if ms else float("nan"),
         "max_ms": round(ms[-1], 1) if ms else float("nan"),
-        "ops_per_sec": round(len(ms) / wall, 1) if wall else float("nan"),
+        # Derived from concurrency / p95 latency, not ops / wall or a p50-based
+        # estimate -- this lab's actual effect (a spike queuing behind a
+        # not-yet-scaled range) shows up specifically as tail latency, not a
+        # uniform shift of the whole distribution: p50 alone was observed
+        # flip-flopping direction (even favoring SPIKE in a clean run with no
+        # warm-up artifact at all), while p95 consistently favored RAMP by
+        # ~3x across every run tried, contaminated or not. Wall-clock is
+        # additionally one straggler op away from making a fast scenario look
+        # like it crawled (observed directly: a single ~5-10s outlier among
+        # 200 ops otherwise finishing in ~20ms each).
+        "ops_per_sec": round(concurrency / (p95 / 1000), 1) if ms and p95 else float("nan"),
     }
 
 
@@ -142,7 +153,7 @@ def print_table(rows, mode):
     table.add_column("p50 (ms)", justify="right")
     table.add_column("p95 (ms)", justify="right")
     table.add_column("max (ms)", justify="right")
-    table.add_column("ops/sec", justify="right")
+    table.add_column("est. ops/sec", justify="right")
 
     for row in rows:
         table.add_row(row["scenario"], str(row["ops"]), str(row["errors"]), str(row["wall_s"]),
@@ -166,14 +177,17 @@ def main():
     ramp_results, ramp_wall = run_ramp(db, args.mode)
 
     print_table([
-        summarize("SPIKE (never-touched)", spike_results, spike_wall),
-        summarize(f"RAMP final stage ({STAGES[-1]} workers, pre-warmed)", ramp_results, ramp_wall),
+        summarize("SPIKE (never-touched)", spike_results, spike_wall, STAGES[-1]),
+        summarize(f"RAMP final stage ({STAGES[-1]} workers, pre-warmed)", ramp_results, ramp_wall, STAGES[-1]),
     ], args.mode)
 
     console.print(
         "\n[dim]Same target concurrency and op count in both rows -- the only difference is "
         "whether it arrived all at once or in stages. This compresses a rule Firestore applies "
-        "over minutes into seconds; treat it as a proxy for the mechanism, not the timescale.[/]"
+        "over minutes into seconds; treat it as a proxy for the mechanism, not the timescale. "
+        "est. ops/sec is concurrency / p95 latency, not ops / wall-clock -- p95 tracks this "
+        "lab's tail-latency effect more reliably than p50 or wall-clock, both of which can "
+        "make a fast scenario look misleadingly bad on any given run.[/]"
     )
 
 
