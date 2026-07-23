@@ -70,7 +70,7 @@ def timed_increment(coll, doc_id):
 def run_spread(db, num_docs):
     """Same total workload (WRITERS x OPS_PER_WRITER ops), spread across num_docs documents."""
     coll = db["lab_counters_experiment"]
-    coll.drop()
+    coll.drop()  # clears any leftovers from the previous run -- nothing drops this one, so the next run's drop() does that instead
     coll.insert_many([{"_id": f"ctr-{i}", "hits": 0} for i in range(num_docs)])
 
     def burst():
@@ -93,7 +93,6 @@ def run_spread(db, num_docs):
     results = burst()
     wall = time.perf_counter() - start
 
-    coll.drop()
     return results, wall
 
 
@@ -133,13 +132,6 @@ def print_table(rows):
         table.add_row(row["scenario"], str(row["median_ms"]))
     console.print(table)
 
-    console.print(
-        "\n[dim]Median (p50): half of all $inc calls in this scenario finished faster "
-        "than this, half slower -- it's what a typical call actually costs. A wall-clock "
-        "total or a max/average can be dominated by one unusually slow call without that "
-        "reflecting the typical cost at all, which is why that's not what's shown here.[/]"
-    )
-
     for row in rows:
         if row["errors"]:
             console.print(
@@ -157,7 +149,7 @@ def main():
 
     if args.docs is not None:
         console.print(f"[dim]Collection: {db.name}.lab_counters_experiment "
-                      f"(scratch, dropped after this run)[/]")
+                      f"(scratch, dropped before each run)[/]")
         console.print(f"Running {WRITERS * OPS_PER_WRITER} ops ({WRITERS} concurrent writers) "
                       f"against {args.docs} document(s)...\n")
         results, wall = run_spread(db, args.docs)
@@ -165,7 +157,7 @@ def main():
         return
 
     console.print(f"[dim]Collections: {db.name}.lab_counters_experiment (scratch COLD docs, "
-                  f"dropped after this run) and {db.name}.lab_counters (the real HOT doc, "
+                  f"dropped before each run) and {db.name}.lab_counters (the real HOT doc, "
                   f"_id=\"global_stats\")[/]")
 
     console.print(f"Running {WRITERS} concurrent writers x {OPS_PER_WRITER} ops "
