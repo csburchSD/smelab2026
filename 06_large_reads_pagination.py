@@ -21,9 +21,12 @@ cursor strategy against the same data:
 
     python 06_large_reads_pagination.py --pagination keyset
 
-which adds a third row using an `_id`-based range cursor instead of
-`.skip()`. Compare its first-page/last-page numbers -- latency and read
-units both -- to skip/limit's and to the unpaginated row above.
+which adds a third row using keyset (cursor-based) pagination: instead of
+skip(n) walking and discarding n entries every page, seek directly to
+where the last page left off using the last-seen _id as the start of an
+`_id`-based range query (`{_id: {$gt: last_id}}`) instead of `.skip()`.
+Compare its first-page/last-page numbers -- latency and read units both --
+to skip/limit's and to the unpaginated row above.
 
     python 06_large_reads_pagination.py --page-size 100
 
@@ -50,7 +53,9 @@ def parse_args():
     )
     parser.add_argument(
         "--pagination", choices=["keyset"], default=None,
-        help="Add a keyset-cursor pagination scenario alongside skip/limit.",
+        help="Add a keyset-cursor pagination scenario alongside skip/limit -- seeks "
+             "directly from the last-seen _id instead of skip(n) walking and "
+             "discarding n entries every page.",
     )
     return parser.parse_args()
 

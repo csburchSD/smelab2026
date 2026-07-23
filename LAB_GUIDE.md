@@ -91,7 +91,7 @@ figure out and justify.
 | 3 | Inserts into `lab_events` across three `_id` key strategies | `python 03_lab_events.py` | `--shard-prefixes N` -- try a different prefix count for the third strategy (0 disables it) |
 | 4 | `explain()` for a common query | `python 04_inefficient_compound_fields.py` | — |
 | 5 | Sudden concurrency spike vs. the same load ramped up in stages | `python 05_lab_traffic_scratch.py` | `--mode reads` -- same spike-vs-ramp comparison, with reads |
-| 6 | Fetching a whole collection at once vs. in pages | `python 06_large_reads_pagination.py` | `--pagination keyset` -- a keyset cursor instead of skip/limit; `--page-size N` -- tunes the page size for either |
+| 6 | Fetching a whole collection at once vs. in pages | `python 06_large_reads_pagination.py` | `--pagination keyset` -- keyset (cursor-based) pagination instead of skip/limit: seeks from the last-seen `_id` instead of skip(n) walking and discarding n entries every page; `--page-size N` -- tunes the page size for either |
 | 7 | Serial vs. batched (at a few sizes) vs. parallel individual writes | `python 07_batch_vs_bulk_writes.py` | `--batch-sizes 5,50,1000` -- your own set of batch sizes |
 
 Use the worksheet below to track what you find before you jump to this
