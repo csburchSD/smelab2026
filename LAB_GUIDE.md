@@ -84,16 +84,25 @@ knob) should be, that's still yours to figure out and justify.
 
 ```bash
 python 01_lab_counters.py   # $inc (atomic increment of a field) under concurrent load -- diagnose and document what's happening and what would fix it
+```
+
+```bash
 python 01_lab_counters.py --docs N   # optional: spread the same workload across N documents
 ```
 
 ```bash
 python 02_lab_devices.py   # $push (append to an array field) -- diagnose and document what's happening and what would fix it
+```
+
+```bash
 python 02_lab_devices.py --test-sizes 50,500,5000   # optional: measure specific array lengths
 ```
 
 ```bash
 python 03_lab_events.py   # inserts into lab_events -- diagnose and document what's happening and what would fix it
+```
+
+```bash
 python 03_lab_events.py --shard-prefixes N   # optional: a third key strategy, N possible prefixes
 ```
 
@@ -103,17 +112,29 @@ python 04_inefficient_compound_fields.py   # explain() for a common query -- dia
 
 ```bash
 python 05_lab_traffic_scratch.py   # a sudden concurrency spike vs. the same load ramped up in stages -- diagnose and document what's happening and what would fix it
+```
+
+```bash
 python 05_lab_traffic_scratch.py --mode reads   # optional: same spike-vs-ramp comparison, with reads
 ```
 
 ```bash
 python 06_large_reads_pagination.py   # fetching a whole collection at once vs. in pages -- diagnose and document what's happening and what would fix it
+```
+
+```bash
 python 06_large_reads_pagination.py --pagination keyset   # optional: a keyset cursor instead of skip/limit
-python 06_large_reads_pagination.py --page-size N           # optional: tunes the page size for either
+```
+
+```bash
+python 06_large_reads_pagination.py --page-size N   # optional: tunes the page size for either
 ```
 
 ```bash
 python 07_batch_vs_bulk_writes.py   # serial vs. batched (at a few sizes) vs. parallel individual writes -- diagnose and document what's happening and what would fix it
+```
+
+```bash
 python 07_batch_vs_bulk_writes.py --batch-sizes 5,50,1000   # optional: your own set of batch sizes
 ```
 
