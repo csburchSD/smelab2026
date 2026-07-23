@@ -74,9 +74,17 @@ def run(cmd):
     returned True and swallowed the real exit code -- so every "already
     removed?" caller below reported success even when the underlying gcloud
     call had actually failed, e.g. from an expired auth token. Silent false
-    positives here are worse than a noisy stderr line.)"""
+    positives here are worse than a noisy stderr line.)
+
+    --quiet auto-accepts gcloud's own prompts, and stdin=DEVNULL is a second
+    line of defense against an unanticipated one blocking forever on input
+    the user can't see they need to give (capture_output=True hides any
+    prompt text in result.stderr instead of the terminal) -- see
+    provision_lab.py's run() for the incident this was copied from."""
     import subprocess
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    if cmd and cmd[0] == "gcloud" and "--quiet" not in cmd:
+        cmd = [cmd[0], "--quiet", *cmd[1:]]
+    result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         print(f"  {' '.join(cmd)}\n  {result.stderr.strip()}", file=sys.stderr)
         return False
@@ -86,8 +94,8 @@ def run(cmd):
 def get_project_number(project_id):
     import subprocess
     result = subprocess.run(
-        ["gcloud", "projects", "describe", project_id, "--format=value(projectNumber)"],
-        capture_output=True, text=True,
+        ["gcloud", "--quiet", "projects", "describe", project_id, "--format=value(projectNumber)"],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     return result.stdout.strip() or None
 
@@ -100,9 +108,9 @@ def list_user_ids(project_id, database_id):
     database silently orphan every earlier run's user + IAM binding."""
     import subprocess
     result = subprocess.run(
-        ["gcloud", "firestore", "user-creds", "list",
+        ["gcloud", "--quiet", "firestore", "user-creds", "list",
          f"--database={database_id}", f"--project={project_id}", "--format=json"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         print(f"  (couldn't list user creds on '{database_id}': {result.stderr.strip()})", file=sys.stderr)

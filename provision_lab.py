@@ -137,7 +137,17 @@ class _Heartbeat:
 
 
 def run(cmd, check=True):
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    """--quiet auto-accepts gcloud's own prompts (e.g. "API not enabled --
+    enable it now?" on a brand-new project), and stdin=DEVNULL is a second
+    line of defense: capture_output=True hides any prompt gcloud prints
+    (it goes into result.stderr, not the terminal), and without DEVNULL,
+    stdin is inherited from this process -- so an unanticipated prompt
+    would block forever on input the user can't see they need to give,
+    instead of failing fast with a visible error (observed directly: this
+    is exactly what happened on a fresh project before --quiet was added)."""
+    if cmd and cmd[0] == "gcloud" and "--quiet" not in cmd:
+        cmd = [cmd[0], "--quiet", *cmd[1:]]
+    result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if check and result.returncode != 0:
         print(result.stderr.strip(), file=sys.stderr)
         raise SystemExit(f"Command failed: {' '.join(cmd)}")
