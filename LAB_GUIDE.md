@@ -20,6 +20,11 @@ No answer key is included here on purpose — that's the exercise.
 isolated environment so it can't collide with anything else on the machine.
 
 ```bash
+git clone https://github.com/csburchSD/smelab2026.git
+cd smelab2026
+```
+
+```bash
 # A venv is a private, disposable copy of Python's package directory, scoped
 # to this shell. If one doesn't already exist here, create it:
 test -d ~/venv || python3 -m venv ~/venv
