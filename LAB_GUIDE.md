@@ -88,7 +88,7 @@ figure out and justify.
 |---|---|---|---|
 | 1 | `$inc` (atomic increment of a field) under concurrent load | `python 01_lab_counters.py` | `--docs N` -- spread the same workload across N documents |
 | 2 | `$push` (append to an array field) under concurrent load | `python 02_lab_devices.py` | `--test-sizes 50,500,5000` -- measure specific array lengths |
-| 3 | Inserts into `lab_events` | `python 03_lab_events.py` | `--shard-prefixes N` -- a third key strategy, N possible prefixes |
+| 3 | Inserts into `lab_events` across three `_id` key strategies | `python 03_lab_events.py` | `--shard-prefixes N` -- try a different prefix count for the third strategy (0 disables it) |
 | 4 | `explain()` for a common query | `python 04_inefficient_compound_fields.py` | — |
 | 5 | Sudden concurrency spike vs. the same load ramped up in stages | `python 05_lab_traffic_scratch.py` | `--mode reads` -- same spike-vs-ramp comparison, with reads |
 | 6 | Fetching a whole collection at once vs. in pages | `python 06_large_reads_pagination.py` | `--pagination keyset` -- a keyset cursor instead of skip/limit; `--page-size N` -- tunes the page size for either |

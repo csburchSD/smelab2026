@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 """Lab 3: lab_events.
 
-lab_events is written to live by this script two ways:
+lab_events is written to live by this script three ways:
   - SEQUENTIAL: every _id is a zero-padded, strictly increasing counter
     (the same shape as an auto-increment key or an ISO timestamp used
     as a primary key)
   - RANDOM: every _id is a UUID4, spreading keys across the whole
     keyspace
+  - SALTED: a sequential counter with a random prefix drawn from [0, N),
+    keeping a recoverable per-prefix ordering while still spreading
+    writes across N ranges
 
-Default (no arguments): runs both and reports insert latency/throughput
-for each. The collection is cleared once at the start of the run, then
-both scenarios' documents accumulate together in lab_events (so you can
-inspect either set of _ids afterward) -- it's not cleared between
+Default (no arguments): runs all three and reports insert latency/throughput
+for each. The collection is cleared once at the start of the run, then all
+three scenarios' documents accumulate together in lab_events (so you can
+inspect any of the _id sets afterward) -- it's not cleared between
 scenarios.
 
 Note: this script measures client-observed insert latency/throughput as
 a proxy signal. Treat the absolute numbers cautiously -- what matters is
 comparing scenarios against each other, not the raw milliseconds.
 
-Your turn: if you have a hypothesis for a key strategy that keeps some
-ordering while avoiding whatever RANDOM avoids, test it with:
+Your turn: try a different prefix count and see how it lands relative to
+the other rows:
 
     python 03_lab_events.py --shard-prefixes N
-
-which runs a third scenario alongside the built-in two: a sequential
-counter with a random prefix drawn from [0, N), added to the same
-comparison table. Try different N and see how it lands relative to the
-other two rows.
 """
 
 import argparse
@@ -55,9 +53,10 @@ _seq = itertools.count()
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--shard-prefixes", type=int, default=0,
-        help="Also run a third scenario: a sequential counter salted with a random "
-             "prefix in [0, N). N=0 (default) skips this scenario.",
+        "--shard-prefixes", type=int, default=3,
+        help="Prefix count for the SALTED scenario: a sequential counter salted with "
+             "a random prefix in [0, N) (default: 3). N=0 skips the SALTED scenario "
+             "entirely.",
     )
     parser.add_argument(
         "--ops-per-writer", type=int, default=OPS_PER_WRITER,

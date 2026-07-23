@@ -428,39 +428,57 @@ propose.
 
 ## 3. Sequential Index Fields — `lab_events`
 
-**Setup:** nothing pre-seeded; `03_lab_events.py` writes into
-the empty collection live, once with a strictly increasing zero-padded
-counter as `_id` (`evt-000000000042`), once with a random UUID4 `_id`.
+**Setup:** nothing pre-seeded; `03_lab_events.py` writes into the empty
+collection live, three ways by default: a strictly increasing zero-padded
+counter as `_id` (`evt-000000000042`, SEQUENTIAL), a random UUID4 `_id`
+(RANDOM), and a sequential counter salted with a random prefix in `[0, N)`
+(SALTED, `--shard-prefixes N`, default N=3) -- unlike every other lab's
+"optional" flag, SALTED is shown by default here rather than hidden behind
+one, a deliberate choice to surface the fix directly instead of leaving it
+for a trainee to discover (confirmed with the requester).
 
-**Symptom:** measured throughput was ~658 ops/sec (sequential) vs. ~1,087
-ops/sec (random) with sequential showing a notably fatter tail (p95 115ms /
-max 450ms vs. p95 30ms / max 116ms random) at only 300 ops per scenario and
-20 concurrent writers. **Caveat to relay to trainees:** this is a
-client-observed proxy. Firestore's MongoDB-compatible layer abstracts the
-physical key-range partitioning, so the client can't see hot-tablet pressure
-directly — Cloud Monitoring's key-visualizer/hot-range metrics would be the
-authoritative signal at production write volumes. The lesson is the
-*mechanism* (monotonic keys concentrate into one key range; random/hashed
-keys spread out), which is true regardless of how visible it is in a small
-client benchmark.
+**Symptom:** historically measured throughput was ~658 ops/sec (sequential)
+vs. ~1,087 ops/sec (random) with sequential showing a notably fatter tail
+(p95 115ms / max 450ms vs. p95 30ms / max 116ms random) at only 300 ops per
+scenario and 20 concurrent writers.
+
+**Important caveat, confirmed via extensive live testing:** this backend (or
+something about the Cloud Shell/GCE environment running the script) pays an
+unpredictable ~5-10s cost on a single op the first time real concurrent load
+hits a given region of the keyspace -- reproducible, but **not
+deterministically avoidable**: the same warm-up code has produced a clean
+run and a run where SEQUENTIAL alone still ate the cost, back-to-back, with
+nothing else different. `03_lab_events.py`'s `warm_up()` targets this
+best-effort (one random-keyed burst, one `next_sequential_id()` burst, since
+a random-keyed warm-up alone does *not* clear it for SEQUENTIAL -- uuid4()
+keys and `evt-<counter>` keys occupy non-overlapping regions of the
+keyspace) but can't guarantee it every run. **If a trainee reports one
+scenario with a wildly elevated max/wall-clock relative to its own p50,
+that's very likely this artifact, not a real result** -- have them rerun
+rather than draw a conclusion from it. p50 is the metric least affected by
+it (a single outlier among hundreds of ops doesn't move the median).
+Separately, at the default 300-op scale, live testing repeatedly found *no*
+reliable p50/p95 gap between SEQUENTIAL/RANDOM/SALTED at all once the
+above artifact is accounted for -- `--ops-per-writer N` sustains load over a
+longer window (e.g. `--ops-per-writer 500` for 10k ops/scenario) if you want
+to test whether a genuine gap emerges at real scale rather than relying on
+the historical numbers above.
 
 **Fix:** don't use a raw auto-increment or raw timestamp as the primary
 write key for high-throughput writes. Either randomize (UUID, hash prefix)
 or, if ordered scans matter, salt/shard the key with a bounded prefix (e.g.
 `shard_03#2026-07-14T...`) so writes fan out across N prefixes while still
-supporting a per-shard range scan. Note the sibling Bigtable lab
+supporting a per-shard range scan -- exactly what the default SALTED
+scenario demonstrates. Note the sibling Bigtable lab
 (`~/workload_benchmark.py`, see root `CLAUDE.md`) uses exactly this
 trade-off in reverse — a *reversed* timestamp to get descending scan order —
 which is a good talking point: the fix depends on whether you need ordering,
 even distribution, or both.
 
-**Nudge, don't tell:** `--shard-prefixes N` runs a third scenario alongside
-the built-in two — a sequential counter salted with a random prefix drawn
-from `[0, N)` — and adds it to the same comparison table. It's a reasonable
-middle ground between SEQUENTIAL and RANDOM for a trainee who wants to
-retain rough ordering; the script doesn't say that's why it exists, so let
-them reach for it once they're proposing a "randomize part of the key"
-fix, and let them interpret where it lands relative to the other two rows.
+**Nudge, don't tell:** `--shard-prefixes N` still lets a trainee test a
+different prefix count than the default 3 and see how it lands relative to
+the other rows -- that part of the exploration is still theirs to drive,
+even though the strategy itself is no longer hidden.
 
 ---
 
