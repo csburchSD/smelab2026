@@ -103,16 +103,20 @@ def run_scenario(coll, id_factory, ops_per_writer=OPS_PER_WRITER):
 
 def warm_up(coll):
     """This backend (or something about this environment) pays a fixed ~5s
-    cost on one op each, on exactly the first two concurrent bursts of a
-    fresh process -- observed directly: reproducible across separate runs,
-    hits every scenario equally regardless of _id strategy or contention
-    (RANDOM has neither and still shows it), and a third burst in the same
-    process is consistently clean. Two untimed throwaway bursts here absorb
-    that before any labeled scenario is measured, so SEQUENTIAL/RANDOM/SALTED
-    are all compared on equal footing instead of whichever ones happen to
-    run first paying a cost the others don't."""
-    for _ in range(2):
-        run_scenario(coll, lambda: str(uuid.uuid4()))
+    cost on one op the first time real concurrent load hits a given region
+    of the keyspace -- observed directly, reproducibly: a random-keyed
+    warm-up burst does NOT clear it for SEQUENTIAL, because uuid4() keys
+    and "evt-<counter>" keys occupy completely different, non-overlapping
+    regions of the keyspace. Warming up with random keys only pre-touches
+    the region RANDOM itself will reuse; it never touches the specific
+    ascending tail SEQUENTIAL is about to extend. So warm up using the same
+    id shape as each real scenario, not just one random burst -- this uses
+    next_sequential_id() directly, which shares SEQUENTIAL's own counter,
+    so the real scenario continues the same ascending tail these warm-up
+    ops just extended (a closer proxy for a real "constantly-growing tail"
+    workload than resetting to 0 would be, anyway)."""
+    run_scenario(coll, lambda: str(uuid.uuid4()))
+    run_scenario(coll, next_sequential_id)
     coll.delete_many({})
 
 
