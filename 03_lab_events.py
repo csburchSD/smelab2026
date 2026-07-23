@@ -59,6 +59,13 @@ def parse_args():
         help="Also run a third scenario: a sequential counter salted with a random "
              "prefix in [0, N). N=0 (default) skips this scenario.",
     )
+    parser.add_argument(
+        "--ops-per-writer", type=int, default=OPS_PER_WRITER,
+        help=f"Ops per concurrent writer per scenario (default: {OPS_PER_WRITER}, "
+             f"i.e. {WRITERS * OPS_PER_WRITER} total ops per scenario). A quick, small "
+             "burst may not run long enough to expose a real hot-range effect -- push "
+             "this up to sustain load over a longer window and see if a gap emerges.",
+    )
     return parser.parse_args()
 
 
@@ -82,12 +89,12 @@ def timed_insert(coll, doc_id):
     return time.perf_counter() - start
 
 
-def run_scenario(coll, id_factory):
+def run_scenario(coll, id_factory, ops_per_writer=OPS_PER_WRITER):
     start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=WRITERS) as pool:
         futures = [
             pool.submit(timed_insert, coll, id_factory())
-            for _ in range(WRITERS * OPS_PER_WRITER)
+            for _ in range(WRITERS * ops_per_writer)
         ]
         latencies = [f.result() for f in futures]
     wall = time.perf_counter() - start
@@ -137,9 +144,9 @@ def main():
     warm_up(coll)
     rows = []
     for label, id_factory in scenarios:
-        console.print(f"Inserting {WRITERS * OPS_PER_WRITER} docs with {label} "
+        console.print(f"Inserting {WRITERS * args.ops_per_writer} docs with {label} "
                       f"via {WRITERS} concurrent writers...")
-        latencies, wall = run_scenario(coll, id_factory)
+        latencies, wall = run_scenario(coll, id_factory, args.ops_per_writer)
         rows.append(summarize(label, latencies, wall))
 
     table = Table(title="Insert latency across key strategies")
