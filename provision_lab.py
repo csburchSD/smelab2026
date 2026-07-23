@@ -58,8 +58,12 @@ def parse_args():
     parser.add_argument("--database-id", default=DEFAULT_DATABASE_ID,
                          help=f"Firestore database ID (default: {DEFAULT_DATABASE_ID}). "
                               "Reused if it already exists.")
-    parser.add_argument("--location", default=DEFAULT_LOCATION,
-                         help=f"Firestore location (default: {DEFAULT_LOCATION}).")
+    parser.add_argument("--location", default=None,
+                         help="Firestore location. Defaults to the region this machine is "
+                              f"detected to be running in, else {DEFAULT_LOCATION}. Running the "
+                              "scripts in a different region than the database adds real "
+                              "cross-region latency to every query in this lab -- see the "
+                              "region-mismatch warning if the two don't match.")
     parser.add_argument("--user-id", default=None,
                          help="SCRAM user ID to create (default: lab-user-<random>, so reruns "
                               "never collide with an existing user).")
@@ -79,6 +83,31 @@ def parse_args():
                          help="Facilitator dry run: reset, then run all 7 anti-pattern scripts "
                               "in sequence.")
     return parser.parse_args()
+
+
+def detect_local_region(timeout=2):
+    """Best-effort region of the machine currently running these scripts, via
+    the GCE metadata server. Returns None off-GCE (e.g. a trainee's own
+    laptop, or Cloud Shell) or if the metadata server doesn't respond within
+    timeout -- callers must treat None as "unknown", not "no mismatch"."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "http://metadata.google.internal/computeMetadata/v1/instance/zone",
+            headers={"Metadata-Flavor": "Google"},
+        )
+        zone = urllib.request.urlopen(req, timeout=timeout).read().decode().strip()
+        # e.g. "projects/123456789/zones/us-west1-b" -> "us-west1"
+        return zone.rsplit("/", 1)[-1].rsplit("-", 1)[0]
+    except Exception:
+        return None
+
+
+def region_from_uri(uri):
+    """Pull the Firestore location out of a MONGO_URI's host
+    (<uid>.<location>.firestore.goog) -- None if it doesn't match that shape."""
+    match = re.search(r"@[^.]+\.([^.]+)\.firestore\.goog", uri)
+    return match.group(1) if match else None
 
 
 class _Heartbeat:
@@ -281,6 +310,17 @@ def check_connection():
     else:
         print(f"Connected. Collections found: {names}")
 
+    db_region = region_from_uri(ENV_PATH.read_text())
+    local_region = detect_local_region()
+    if db_region and local_region and db_region != local_region:
+        print(
+            f"\nWarning: this database is in {db_region}, but this machine is running in "
+            f"{local_region}. Every query in this lab will cross regions, which adds real "
+            "latency on top of whatever anti-pattern you're trying to isolate -- run these "
+            f"scripts from a machine in {db_region}, or `python decommission_lab.py` and "
+            f"reprovision with `--location {local_region}`."
+        )
+
 
 def show_menu():
     """Interactive fallback for `python provision_lab.py` with no flags at
@@ -341,6 +381,30 @@ def main():
 
     user_id = args.user_id or f"lab-user-{secrets.token_hex(4)}"
     db_already_exists = database_exists(args.project_id, args.database_id)
+    local_region = detect_local_region()
+
+    region_warning = None
+    if db_already_exists:
+        existing_uid, existing_location = get_database_uid_location(args.project_id, args.database_id)
+        if local_region and existing_location != local_region:
+            region_warning = (
+                f"'{args.database_id}' already exists in {existing_location}, but this machine "
+                f"is running in {local_region}. Every query in this lab will cross regions, "
+                "which adds real latency on top of whatever anti-pattern you're trying to "
+                "isolate. To fix it: `python decommission_lab.py`, then rerun with "
+                f"--location {local_region} (or run these scripts from a machine in "
+                f"{existing_location})."
+            )
+    else:
+        args.location = args.location or local_region or DEFAULT_LOCATION
+        if local_region and args.location != local_region:
+            region_warning = (
+                f"this machine is running in {local_region}, but you're about to create the "
+                f"database in {args.location}. Every query in this lab will cross regions, "
+                "which adds real latency on top of whatever anti-pattern you're trying to "
+                f"isolate -- pass --location {local_region} unless you specifically intend to "
+                "run cross-region."
+            )
 
     print("Plan:")
     print(f"  Project:  {args.project_id}")
@@ -351,27 +415,32 @@ def main():
           f"{' (will overwrite existing file)' if ENV_PATH.exists() else ''}")
     if not args.skip_seed:
         print("  Then:     seeds the lab_ collections")
+    if region_warning:
+        print(f"\nWarning: {region_warning}")
 
     if args.dry_run:
         print("\n--dry-run: no gcloud calls that create or modify anything were made.")
         return
 
     if not args.yes:
-        confirm = input("\nThis will create real, billed GCP resources. Continue? [y/N] ").strip().lower()
+        prompt = "\nThis will create real, billed GCP resources. Continue? [y/N] "
+        if region_warning:
+            prompt = "\nContinue despite the region mismatch above? [y/N] "
+        confirm = input(prompt).strip().lower()
         if confirm != "y":
             print("Aborted.")
             return
 
     if not db_already_exists:
         create_database(args.project_id, args.database_id, args.location)
+        existing_uid, existing_location = get_database_uid_location(args.project_id, args.database_id)
     else:
         print(f"Database '{args.database_id}' already exists -- reusing it.")
 
     project_number = get_project_number(args.project_id)
     password = create_user(args.project_id, args.database_id, user_id)
     add_iam_binding(args.project_id, project_number, args.database_id, user_id)
-    uid, location = get_database_uid_location(args.project_id, args.database_id)
-    uri = build_uri(user_id, password, uid, location, args.database_id)
+    uri = build_uri(user_id, password, existing_uid, existing_location, args.database_id)
     write_env(uri)
     print(f"Wrote {ENV_PATH} (password redacted from this output).")
 

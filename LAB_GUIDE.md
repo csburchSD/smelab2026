@@ -33,28 +33,15 @@ source ~/venv/bin/activate
 pip install -r _internal/requirements.txt
 ```
 
-The lab reads which database to connect to from a `.env` file in this
-directory (`MONGO_URI=<connection string>`). Copy `.env.example` to `.env`
-and fill in the connection string if one isn't already set up for you --
-this contains a username/password, so it's gitignored and never committed:
+Now provision your lab environment:
 
 ```bash
-cp -n .env.example .env  # -n: won't clobber a .env you already have; edit MONGO_URI inside if it's still a placeholder
+python provision_lab.py --project-id YOUR_PROJECT_ID
 ```
 
-Now confirm you can actually reach the database:
-
-```bash
-python provision_lab.py --check
-```
-
-This connects using `MONGO_URI` and reports what it finds -- something like
-`Connected. Collections found: ['lab_bookings', 'lab_counters', 'lab_devices']`
-means you're good to go. If instead it reports a connection error, `MONGO_URI`
-in `.env` is wrong or the database/user isn't provisioned yet (see
-`FACILITATOR_GUIDE.md`); if it connects but finds no collections, you're
-pointed at the right host but the wrong (unseeded) database -- double check
-the database name in `MONGO_URI`'s path (after the host, before the `?`).
+This creates a Firestore Enterprise database and user in your GCP project,
+seeds it, and writes a working `.env` for you -- nothing to copy or edit by
+hand.
 
 ## The seeded collections
 
@@ -71,17 +58,58 @@ touching when it starts, so you always know what to go poke at directly.
 
 ## Reproducing each anti-pattern
 
-Run these to see the symptom for yourself before (and after) you fix anything:
+Run these to see the symptom for yourself before (and after) you fix anything.
+Most also take an argument so you can point the same measurement harness at
+your own idea instead of only the built-in scenario -- run `--help` on any of
+them for details; these don't tell you what N (or whether it's even the right
+knob) should be, that's still yours to figure out and justify.
 
 ```bash
 python 01_lab_counters.py   # $inc (atomic increment of a field) under concurrent load -- diagnose and fix the contention yourself
-python 02_lab_devices.py       # $push (append to an array field) -- diagnose and fix the latency yourself
-python 03_lab_events.py     # inserts into lab_events -- diagnose and fix the _id strategy yourself
-python 04_inefficient_compound_fields.py  # explain() for a common query -- diagnose and fix the indexing yourself
-python 05_lab_traffic_scratch.py         # a sudden concurrency spike vs. the same load ramped up in stages
-python 06_large_reads_pagination.py       # fetching a whole collection at once vs. in pages
-python 07_batch_vs_bulk_writes.py         # serial vs. batched (at a few sizes) vs. parallel individual writes
 ```
+
+Optional: `python 01_lab_counters.py --docs N` -- spread the same workload
+across N documents.
+
+```bash
+python 02_lab_devices.py   # $push (append to an array field) -- diagnose and fix the latency yourself
+```
+
+Optional: `python 02_lab_devices.py --test-sizes 50,500,5000` -- measure
+specific array lengths.
+
+```bash
+python 03_lab_events.py   # inserts into lab_events -- diagnose and fix the _id strategy yourself
+```
+
+Optional: `python 03_lab_events.py --shard-prefixes N` -- a third key
+strategy, N possible prefixes.
+
+```bash
+python 04_inefficient_compound_fields.py   # explain() for a common query -- diagnose and fix the indexing yourself
+```
+
+```bash
+python 05_lab_traffic_scratch.py   # a sudden concurrency spike vs. the same load ramped up in stages
+```
+
+Optional: `python 05_lab_traffic_scratch.py --mode reads` -- same
+spike-vs-ramp comparison, with reads.
+
+```bash
+python 06_large_reads_pagination.py   # fetching a whole collection at once vs. in pages
+```
+
+Optional: `python 06_large_reads_pagination.py --pagination keyset` -- a
+keyset cursor instead of skip/limit. `--page-size N` tunes the page size for
+either.
+
+```bash
+python 07_batch_vs_bulk_writes.py   # serial vs. batched (at a few sizes) vs. parallel individual writes
+```
+
+Optional: `python 07_batch_vs_bulk_writes.py --batch-sizes 5,50,1000` --
+your own set of batch sizes.
 
 Use the worksheet below to track what you find before you jump to this
 guide's AI-assistant prompts or `FACILITATOR_GUIDE.md` -- the goal is your
@@ -100,28 +128,10 @@ own working theory for each collection, not just a number in a table.
 Each script prints the query or write pattern it's running — read the source,
 not just the output. That's what you're being asked to fix.
 
-## Testing your own hypothesis
+## Ask your AI assistant
 
-Scripts 1-3 and 5-7 aren't just fixed before/after demos — each takes an
-argument so you can point the same measurement harness at your own idea
-instead of only the built-in scenarios:
-
-```bash
-python 01_lab_counters.py --docs N       # spread the same workload across N documents
-python 02_lab_devices.py --test-sizes 50,500,5000   # measure specific array lengths
-python 03_lab_events.py --shard-prefixes N       # a third key strategy, N possible prefixes
-python 05_lab_traffic_scratch.py --mode reads                 # same spike-vs-ramp comparison, with reads
-python 06_large_reads_pagination.py --pagination keyset         # a keyset cursor instead of skip/limit
-python 06_large_reads_pagination.py --page-size N               # tune the page size
-python 07_batch_vs_bulk_writes.py --batch-sizes 5,50,1000       # your own set of batch sizes
-```
-
-Run `--help` on any of them for details. These don't tell you what N (or
-whether this is even the right knob) should be — that's still yours to
-figure out and justify.
-
-Useful things to ask your AI assistant about along the way -- notice these
-ask you to explain *your own numbers*, not "what's the answer":
+A few prompts worth trying along the way -- notice these ask you to explain
+*your own numbers*, not "what's the answer":
 - "Here's what I measured for writes to one document vs. many -- what would
   explain a gap like this?"
 - "Here's how this document's size and write latency changed as its array
@@ -149,8 +159,24 @@ python provision_lab.py --reset
 This drops and rebuilds all four `lab_` collections, including any indexes you
 added.
 
-## Rules of engagement
+## Tearing down
 
-- `explain("executionStats")` on a `pymongo` cursor is your best diagnostic
-  tool for anti-patterns 3 and 4. `db.command("collStats", "<name>")` is
-  useful for 1 and 2.
+When you're completely done with the lab (not just resetting the data, but
+removing the database, its user, and the IAM access it granted):
+
+```bash
+python decommission_lab.py --project-id YOUR_PROJECT_ID
+```
+
+This looks up every SCRAM user on the database (not just the one in your
+`.env`), removes each one's IAM data-access binding and credentials, then
+deletes the Firestore Enterprise database itself -- which also removes every
+`lab_` collection in it. It'll ask you to type the database ID back to
+confirm before deleting anything (skip that with `--yes`), and this is not
+reversible -- there's no undo for a deleted database.
+
+If you just want to see what it would do first, without touching anything:
+
+```bash
+python decommission_lab.py --project-id YOUR_PROJECT_ID --dry-run
+```
