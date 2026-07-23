@@ -76,67 +76,23 @@ touching when it starts, so you always know what to go poke at directly.
 
 ## Reproducing each anti-pattern
 
-Run these to see the symptom for yourself before (and after) you fix anything.
-Most also take an argument so you can point the same measurement harness at
-your own idea instead of only the built-in scenario -- run `--help` on any of
-them for details; these don't tell you what N (or whether it's even the right
-knob) should be, that's still yours to figure out and justify.
+Run each base command to see the symptom for yourself before (and after) you
+fix anything -- for all of them, diagnose and document what's happening and
+what would fix it. Most also take an argument so you can point the same
+measurement harness at your own idea instead of only the built-in scenario
+(run `--help` on any of them for the full set); these don't tell you what N
+(or whether it's even the right knob) should be, that's still yours to
+figure out and justify.
 
-```bash
-python 01_lab_counters.py   # $inc (atomic increment of a field) under concurrent load -- diagnose and document what's happening and what would fix it
-```
-
-```bash
-python 01_lab_counters.py --docs N   # optional: spread the same workload across N documents
-```
-
-```bash
-python 02_lab_devices.py   # $push (append to an array field) -- diagnose and document what's happening and what would fix it
-```
-
-```bash
-python 02_lab_devices.py --test-sizes 50,500,5000   # optional: measure specific array lengths
-```
-
-```bash
-python 03_lab_events.py   # inserts into lab_events -- diagnose and document what's happening and what would fix it
-```
-
-```bash
-python 03_lab_events.py --shard-prefixes N   # optional: a third key strategy, N possible prefixes
-```
-
-```bash
-python 04_inefficient_compound_fields.py   # explain() for a common query -- diagnose and document what's happening and what would fix it
-```
-
-```bash
-python 05_lab_traffic_scratch.py   # a sudden concurrency spike vs. the same load ramped up in stages -- diagnose and document what's happening and what would fix it
-```
-
-```bash
-python 05_lab_traffic_scratch.py --mode reads   # optional: same spike-vs-ramp comparison, with reads
-```
-
-```bash
-python 06_large_reads_pagination.py   # fetching a whole collection at once vs. in pages -- diagnose and document what's happening and what would fix it
-```
-
-```bash
-python 06_large_reads_pagination.py --pagination keyset   # optional: a keyset cursor instead of skip/limit
-```
-
-```bash
-python 06_large_reads_pagination.py --page-size N   # optional: tunes the page size for either
-```
-
-```bash
-python 07_batch_vs_bulk_writes.py   # serial vs. batched (at a few sizes) vs. parallel individual writes -- diagnose and document what's happening and what would fix it
-```
-
-```bash
-python 07_batch_vs_bulk_writes.py --batch-sizes 5,50,1000   # optional: your own set of batch sizes
-```
+| # | Scenario | Base command | Optional |
+|---|---|---|---|
+| 1 | `$inc` (atomic increment of a field) under concurrent load | `python 01_lab_counters.py` | `--docs N` -- spread the same workload across N documents |
+| 2 | `$push` (append to an array field) under concurrent load | `python 02_lab_devices.py` | `--test-sizes 50,500,5000` -- measure specific array lengths |
+| 3 | Inserts into `lab_events` | `python 03_lab_events.py` | `--shard-prefixes N` -- a third key strategy, N possible prefixes |
+| 4 | `explain()` for a common query | `python 04_inefficient_compound_fields.py` | — |
+| 5 | Sudden concurrency spike vs. the same load ramped up in stages | `python 05_lab_traffic_scratch.py` | `--mode reads` -- same spike-vs-ramp comparison, with reads |
+| 6 | Fetching a whole collection at once vs. in pages | `python 06_large_reads_pagination.py` | `--pagination keyset` -- a keyset cursor instead of skip/limit; `--page-size N` -- tunes the page size for either |
+| 7 | Serial vs. batched (at a few sizes) vs. parallel individual writes | `python 07_batch_vs_bulk_writes.py` | `--batch-sizes 5,50,1000` -- your own set of batch sizes |
 
 Use the worksheet below to track what you find before you jump to this
 guide's AI-assistant prompts or `FACILITATOR_GUIDE.md` -- the goal is your
@@ -153,7 +109,7 @@ own working theory for each collection, not just a number in a table.
 | 7 | `lab_bulkwrite_scratch` | Write throughput vs. batch size / parallelism | | |
 
 Each script prints the query or write pattern it's running — read the source,
-not just the output. That's what you're being asked to fix.
+not just the output. That's what you're being asked to document.
 
 ## Ask your AI assistant
 
