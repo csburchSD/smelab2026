@@ -271,34 +271,20 @@ don't match — see the region note under "Fast path" above.
 (the operator that atomically increments a numeric field) by many
 concurrent callers (e.g. a naive global page-view counter).
 
-**Symptom (`01_lab_counters.py`):** the script reports only the median (p50)
-latency per scenario — wall-clock, max, and ops/sec are dominated by a
-single outlier op unrelated to contention (see caveat below), so they'd
-bury the actual signal here. Median shows it clearly: 20 concurrent writers
-doing 100 total `$inc` ops against one shared document run materially
-slower than the same 100 ops spread across 20 documents (measured: ~95ms
-hot vs. ~14ms cold). Firestore serializes writes to a single document;
-concurrent writers queue behind each other.
-
-**Caveat worth knowing before a trainee asks about it:** the COLD scenario
-reproducibly shows one very slow op (~5.0-5.1s, consistent across repeated
-runs, not random noise) that never errors and never moves the median, but
-used to dominate the old wall-clock/max columns. Best guess: `run_spread()`
-always runs first in a fresh process, so it likely eats a one-time
-connection-pool growth cost unrelated to contention. If a trainee reports
-this, it's a legitimate observation, not a broken measurement — median is
-immune to it, which is exactly why the script reports only median.
+**Symptom (`01_lab_counters.py`):** 20 concurrent writers doing 100 total
+`$inc` ops against one shared document run materially slower than the same
+100 ops spread across 20 documents (measured: ~95ms hot vs. ~14ms cold).
+Firestore serializes writes to a single document; concurrent writers queue
+behind each other.
 
 **Fix:** shard the counter. Maintain N separate shard documents (e.g.
 `global_stats_shard_0..9`), write to a randomly chosen shard per increment,
 and sum shards to read the total. (These are separate top-level documents in
-the collection, not sub-documents/embedded documents — this MongoDB-compatible
-edition of Firestore has no subcollection or parent/child document hierarchy
-the way Firestore's native mode does.) This is the standard "distributed
-counter" pattern (same idea Firestore's own docs recommend for native mode). For
-non-counter hot documents (e.g. a single "settings" doc every request reads
-*and* writes), the fix is usually to split read-heavy and write-heavy fields
-into separate documents instead.
+the collection, not sub-documents/embedded documents.) This is the standard
+"distributed counter" pattern (same idea Firestore's own docs recommend for
+native mode). For non-counter hot documents (e.g. a single "settings" doc
+every request reads *and* writes), the fix is usually to split read-heavy
+and write-heavy fields into separate documents instead.
 
 **Trap to watch for:** trainees may reach for an explicit transaction or a
 retry loop — that reduces *correctness* risk (lost updates) but does not fix
@@ -313,12 +299,7 @@ Concurrent writers to the same document collide at commit time; the backend
 retries internally, and if it can't get a clean commit it hard-fails with
 `ABORTED: Too much contention on these documents`. Since `retryWrites=false`
 is required on this connection, the driver never auto-retries that (or any
-transient failure) — the app must. `01_lab_counters.py` catches and counts
-these, calling them out explicitly (only when they actually happen, not as
-a permanent column) since that's a real result, not noise; at this lab's default
-concurrency (20 writers × 5 ops) the backend's internal retries absorb the
-contention and no errors surface — push `WRITERS`/`OPS_PER_WRITER` higher to
-see the abort rate climb.
+transient failure) — the app must.
 
 **Nudge, don't tell:** `--docs N` spreads the same total workload across N
 documents (N=1 reproduces HOT, N=20 reproduces COLD) without the script
@@ -332,8 +313,6 @@ shows up as one thin, bright horizontal line in Key Visualizer's writes
 heatmap — one row getting hit far harder than its neighbors. Elevated
 `ABORTED`/`DEADLINE_EXCEEDED` rates against one specific document path in
 application logs are the same signal without needing Key Visualizer access.
-Labs 3 and 5 below use the same tool for a different-shaped hotspot (a
-moving edge or a whole narrow range, instead of one fixed row).
 
 **Related, not reproduced by this script:** client-side debouncing/batching
 (buffer non-critical updates and flush periodically instead of writing on
@@ -357,9 +336,8 @@ them.
 
 **Symptom (`02_lab_devices.py`):** both document size and `$push`
 (the operator that appends a value to an array field) append latency scale
-with existing array size (measured: 0 readings → 0.3 KB
-/ 16ms append; 9,000 readings → 658 KB / ~105-120ms append). The script also
-builds a scratch document with 120,000 readings (~16.6 MB) and shows it
+with existing array size. The script also builds a scratch document with
+120,000 readings (~16.6 MB) and shows it
 **fails outright** — `DocumentTooLarge: BSON document too large ... supports
 BSON document sizes up to 16793598 bytes`. That's the real ceiling this
 pattern eventually hits, not a script bug. (Worth knowing the ceiling
@@ -368,15 +346,7 @@ this lab's Enterprise MongoDB-compatible API caps at ~16 MiB, matching
 MongoDB's own BSON limit, as shown by the error above. Either way, the
 fixes below apply regardless of which ceiling you're up against.)
 
-**Fix — Google's general Firestore guidance names three patterns here
-(separate documents/subcollections, bucketing, TTL expiry). One caveat
-worth knowing before relaying this: "subcollections" is a **native
-Firestore-mode** concept (a document nesting its own collections) and
-doesn't exist in the MongoDB-compatible API this lab runs on at all — it's
-absent from the [MongoDB 7.0 compatibility
-list](https://docs.cloud.google.com/firestore/mongodb-compatibility/docs/supported-features-70)
-entirely. The equivalent here is option 1 below: an ordinary flat
-collection, not a nested one.**
+**Fix:**
 
 1. **Separate documents, one per reading (recommended default).** Move
    readings out of the device document entirely, into their own collection,
@@ -421,36 +391,22 @@ collection, not a nested one.**
    db.lab_device_readings.createIndex({ ts: 1 }, { expireAfterSeconds: 2592000 }); // 30 days
    ```
 
-   Caveat worth flagging: `expireAfterSeconds` has to be set when the index
-   is *created*. The compatibility list marks `collMod: expireAfterSeconds`
-   (the standard MongoDB way to change an existing TTL value in place) as
-   unsupported here — to change the retention window later, drop and
-   recreate the index with the new value, don't reach for `collMod`.
-
 4. **Offload genuinely large payloads to object storage.** If what's
    growing isn't "a long list of small readings" but actual large blobs
    (images, files, long text), store the blob in Cloud Storage and keep only
    a reference URL in the Firestore document — this sidesteps the
    document-size ceiling entirely rather than working around it.
 
+5. **Cap the array with `$push` + `$slice`, for a bounded rolling window.**
+   (`$slice` trims a `$push`ed array down to its last N entries in the same
+   update.) Valid when the access pattern only ever needs "the last N" (e.g.
+   last 20 readings) — but it silently *discards* older data, so it's the
+   wrong choice for anything that needs full history.
+
 Either way, embed only a small, bounded summary (e.g. `last_reading`) in the
 parent device document for the common "give me the latest value" read —
 don't make that read pay for a join/second query just to avoid the
 unbounded array.
-
-**Trap to watch for:** trainees sometimes propose "just cap the array at N
-with `$push` + `$slice`" (`$slice` trims a `$push`ed array down to its last N
-entries in the same update) — that's a legitimate bounded-embedding fix for small
-N (e.g. "last 20 readings"), but it silently *discards* older data, which is
-fine for a rolling cache and wrong for anything that needs history. Ask what
-the access pattern actually requires before accepting that fix.
-
-**Nudge, don't tell:** `--test-sizes 50,500,5000` builds a scratch document
-at each given array length and reports its size/append latency, so a
-trainee weighing a bucket-size cutoff can measure candidate sizes directly
-instead of only the four pre-seeded points. It doesn't suggest what
-threshold to pick or that bucketing is the fix — that's still theirs to
-propose.
 
 ---
 
@@ -468,16 +424,10 @@ for a trainee to discover.
 **Lead with the mechanism, not the table:** Firestore stores keys
 **lexicographically**. A monotonically increasing `_id` means every new
 write lands at the same, constantly-advancing edge of that lexicographic
-order, concentrating write volume on a limited number of Spanner tablets
-(the storage layer underneath Firestore) instead of spreading it across
-ranges the backend already knows about — the internal reason behind
-Google's own "avoid sequential keys" guidance. A randomized or salted key
-has no single "latest" edge to concentrate on. This is true regardless of
-what any one lab run's numbers show -- treat that as the takeaway trainees
-should walk away with, and the measurements below as supporting evidence,
-not the proof itself. (This mirrors how lab 6 frames its own
-counterintuitive numbers: the mechanism is real even on a run where the raw
-comparison doesn't show it cleanly.)
+order, concentrating write volume on a narrow part of the backend's key
+range instead of spreading it across ranges the backend already knows about
+— the reason behind Google's own "avoid sequential keys" guidance. A
+randomized or salted key has no single "latest" edge to concentrate on.
 
 **Identification, if you have Key Visualizer access:** look for a bright,
 concentrated band advancing along one edge of the writes heatmap, as
@@ -502,33 +452,10 @@ mechanism also hits **indexed field values**, not just `_id` — e.g. a
 The fix family is the same (avoid ever-increasing or narrowly-clustered
 indexed values under high write rates); Native/Datastore mode also offers a
 single-field index exemption for fields that never need to be queried or
-sorted on, but that's **not confirmed to have an equivalent in this
-MongoDB-compatible API** — check the compatibility docs before promising a
-trainee that `coll.create_index(...)` here has the same escape hatch.
+sorted on.
 
-**Symptom:** historically measured throughput was ~658 ops/sec (sequential)
-vs. ~1,087 ops/sec (random) with sequential showing a notably fatter tail
-(p95 115ms / max 450ms vs. p95 30ms / max 116ms random) at only 300 ops per
-scenario and 20 concurrent writers.
-
-**Important caveat:** this lab hits
-the same reproducible ~5-10s single-op startup artifact described under lab
-1 above, but here it's **not deterministically avoidable** by warming up
-first -- the same warm-up code has produced both a clean run and a run
-where SEQUENTIAL alone still ate the cost, back-to-back. `warm_up()`
-targets it with two bursts, not one, because a random-keyed burst alone
-does *not* clear it for SEQUENTIAL (`uuid4()` keys and `evt-<counter>` keys
-occupy non-overlapping regions of the keyspace). **If a trainee reports one
-scenario with a wildly elevated max/wall-clock relative to its own p50,
-that's very likely this artifact** -- have them rerun rather than draw a
-conclusion from it; p50 is immune to it. Separately, at the default 300-op
-scale, live testing found *no* reliable p50/p95 gap between the three
-scenarios once the artifact is accounted for -- `--ops-per-writer N`
-sustains load over a longer window (e.g. `--ops-per-writer 500`) if you
-want to test for a gap at real scale.
-
-**The "Drift" column exists because of exactly that gap:** rather than only
-comparing scenarios' overall latency to each other (vulnerable to the
+**Why there's a "Drift" column:** rather than only comparing scenarios'
+overall latency to each other (vulnerable to the
 startup artifact landing differently in each scenario), each row also
 reports its own second-half p50 vs. first-half p50, within that one
 scenario's run -- a monotonic key's hot edge getting harder to serve as it
@@ -546,16 +473,7 @@ write key for high-throughput writes. Either randomize (UUID, hash prefix)
 or, if ordered scans matter, salt/shard the key with a bounded prefix (e.g.
 `shard_03#2026-07-14T...`) so writes fan out across N prefixes while still
 supporting a per-shard range scan -- exactly what the default SALTED
-scenario demonstrates. Note the sibling Bigtable lab
-(`~/workload_benchmark.py`, see root `CLAUDE.md`) uses exactly this
-trade-off in reverse — a *reversed* timestamp to get descending scan order —
-which is a good talking point: the fix depends on whether you need ordering,
-even distribution, or both.
-
-**Nudge, don't tell:** `--shard-prefixes N` still lets a trainee test a
-different prefix count than the default 3 and see how it lands relative to
-the other rows -- that part of the exploration is still theirs to drive,
-even though the strategy itself is no longer hidden.
+scenario demonstrates.
 
 ---
 
@@ -617,16 +535,8 @@ Firestore's planner filters the already-narrow equality+sort result set in
 memory — but keep it in the index if the range predicate is very selective
 and you want it eliminated before the fetch stage.
 
-**Trap to watch for:** trainees who create an index but don't check the
-*direction* (`1` vs `-1`) against the query's `.sort()` direction will often
-land on the "wrong order" row above and conclude indexing doesn't help —
-walk them back to checking `explain()`'s stage tree (`COLLSCAN` /
-`IDXSCAN` / `SORT` / `FILTER`) rather than just re-running the query and
-eyeballing wall-clock time.
-
-Trainees will do this via `coll.create_index(...)` (MQL, the tool actually
-in front of them). For reference, the equivalent via `gcloud` — useful if
-you're pre-building the answer or scripting a reset — is:
+For reference, the equivalent via `gcloud` — useful if you're pre-building
+the answer or scripting a reset — is:
 
 ```bash
 gcloud firestore indexes composite create \
@@ -638,15 +548,6 @@ gcloud firestore indexes composite create \
     --field-config=field-path=created_at,order=descending \
     --field-config=field-path=price,order=ascending
 ```
-
-Against this lab's `lab_bookings`, this drops `docs examined`
-to 20 (from 12,000) and read units to 23. Two non-obvious flags: `--api-scope
-=mongodb-compatible-api` is required (the default `any-api` scope is
-rejected for this index shape), and it must be paired with
-`--query-scope=collection-group` — omitting it and leaving the default
-(`collection`) fails with `INVALID_ARGUMENT: Indexes with the
-MONGODB_COMPATIBLE_API API scope must use the COLLECTION_GROUP query
-scope.`
 
 ---
 
@@ -671,31 +572,6 @@ timescale. The *mechanism* is the same one described under lab 1's caveat
 above: a key range's first exposure to real concurrency pays a one-time
 backend routing/warm-up cost that an already-exercised range doesn't.
 
-**Symptom (measured on `labdb1`):** SPIKE: wall 1.526s, p95 1268ms, max
-1510ms, est. 31.5 ops/sec. RAMP final stage (identical shape): wall 0.662s,
-p95 464ms, max 644ms, est. 86.2 ops/sec — roughly 2.7x the throughput and a
-third of the tail latency, from ramping the *same* total concurrency up in
-stages instead of all at once. `--mode reads` reproduces the same shape for
-reads (SPIKE p95 1110ms/max 1245ms/est. 36.0 ops/sec vs. RAMP p95 392ms/max
-488ms/est. 102.0 ops/sec), confirming the rule's read+write scope isn't just
-a write-side story here.
-
-**Why "est. ops/sec" and not p50 or wall-clock, and a caveat shared with labs
-1 and 3 above:** this script hits the same reproducible startup artifact
-documented there, not something either scenario here "does wrong." Live
-testing found p50 alone actually **flips direction** run to run here (it favored
-SPIKE, backwards from the lesson, in at least one clean run with no artifact
-contamination at all), because this lab's real effect — a spike queuing
-behind a not-yet-scaled range — shows up specifically as *tail* latency, not
-a uniform shift of the whole distribution. p95 held the correct direction
-(RAMP faster) across every run tried, contaminated or not, which is why
-`05_lab_traffic_scratch.py` derives its printed `est. ops/sec` column as
-`concurrency / p95` rather than `ops / wall-clock` (also one straggler op
-away from making a fast scenario look like it crawled) or a p50-based
-estimate. If a trainee's own run shows p50 disagreeing with p95 on which
-scenario "won," that's expected — trust p95 here, and feel free to have them
-rerun once to see it settle.
-
 **Fix:** don't let real traffic hit a new range at full concurrency on day
 one. Ramp up gradually (the literal 500/50/5 schedule in production), and
 separately, avoid concentrating sustained high-rate traffic on a narrow
@@ -703,16 +579,6 @@ document range at all — the fixes from labs 1 (shard hot documents) and 3
 (randomize/salt monotonic keys) are exactly how you widen a "narrow
 range" in the first place. This lab is about the *rate of onset* on top of
 whatever range width you already have.
-
-**Trap to watch for:** trainees may propose "just always run at full
-concurrency, since it's just a one-time cost" — true for a single lab run,
-false in production, where new ranges (new shard key prefixes, new
-partitions from resharding, a fresh collection after a migration) appear
-continuously as an app grows. The lesson is the pattern, not this one range.
-
-**Nudge, don't tell:** `--mode reads` is the only flag; it doesn't say why
-you'd want to test reads separately — let a trainee arrive at "the rule
-says read/write/delete" on their own and confirm it holds for reads too.
 
 **Identification, if you have Key Visualizer access:** a narrow range under
 heavy traffic shows as a bright, concentrated block in the heatmap (the
@@ -735,12 +601,6 @@ background over a tight loop of deletes against adjacent keys.
 **Setup:** the same 12,000-document `lab_bookings` used in lab 4, read (not
 modified) two ways: one unpaginated `find({})` materializing everything
 client-side, vs. paginated fetches via `.skip(n).limit(page_size)`.
-`setup_lab.py` seeds this collection with an index on `_id` (`_id_1`) --
-without it, `coll.index_information()` returns `{}` here (this backend, unlike
-real MongoDB, does **not** auto-create a default `_id` index), and every
-paginated fetch below falls back to a full `COLLSCAN` + in-memory sort
-regardless of strategy, masking the exact comparison this lab is about. With
-the index seeded, the two pagination strategies genuinely diverge -- see below.
 
 **This lab is literally two named anti-patterns at once:** UNPAGINATED is
 Google's own "queries without limits" anti-pattern (an unbounded `find({})`
@@ -749,16 +609,6 @@ with no `.limit()`), and PAGINATED skip/limit is "offset in pagination"
 documented causes of ballooning read cost as a collection grows. Worth
 naming both explicitly if a trainee wants the official terminology.
 
-**Symptom (measured on `firestore-lab`, default `--page-size 500`, 24 pages):**
-UNPAGINATED: 1 round trip, wall 0.23s. PAGINATED skip/limit: 24 round trips,
-wall 1.7s, first page 84ms / last page 25ms / avg 69ms. **Counterintuitive but
-real: unpaginated is faster in total wall-clock time here.** The driver
-already streams a `find({})` cursor via internal `getMore` continuations
-reusing one server-side query plan; issuing 24 *separate* `find()` calls
-(whether skip/limit or keyset) each pays this backend's fixed per-query
-overhead from scratch, and 24x that overhead outweighs the unpaginated read's
-single ~230ms.
-
 **This is the point, not a bug in the demo:** the case for pagination here
 isn't "it's faster" — at this lab's scale it measurably isn't. It's that
 unpaginated forces the *entire* result set resident in memory at once with
@@ -766,21 +616,16 @@ no way to checkpoint or bound a single request's latency/payload size. At
 real production scale (a collection too large to fit in memory, or a
 result set that would blow a request timeout or response-size quota),
 unpaginated isn't slower, it's not viable at all — which this 12k-doc lab
-is too small to demonstrate directly. Be upfront about that distinction
-rather than letting the trainee conclude "the numbers say don't paginate."
+is too small to demonstrate directly.
 
 **Read units expose exactly the cost story the index makes possible:** at
 `--page-size 500` (24 pages), skip/limit's read units grow from **511 on page
 1 to 750 on the last page** (skip=11500) — visible even at this shallow
-depth. Keyset's stay flat at **511 on every page**. Re-running at
-`--page-size 50` (240 pages) makes the gap dramatic: skip/limit climbs from
-**52 to 300 read units** (~6x), keyset stays flat at **52** throughout.
-Latency tells a similar but smaller story (skip/limit's last page runs
-slower than a flat keyset cursor at depth), but **read units are the clean,
-unambiguous signal** — `skip(n)` still has to walk and discard `n` index
-entries server-side even with an index behind the sort, so its cost scales
-with depth; a keyset cursor (`{_id: {$gt: last_id}}`) seeks directly to its
-starting point every time, so its cost doesn't.
+depth. Keyset's stay flat at **511 on every page**. `skip(n)` still has to
+walk and discard `n` index entries server-side even with an index behind
+the sort, so its cost scales with depth; a keyset cursor (`{_id: {$gt:
+last_id}}`) seeks directly to its starting point every time, so its cost
+doesn't.
 
 **Fix:** paginate for *boundedness*, not raw speed — cap page size to keep
 each request's latency/memory predictable — and prefer a keyset/range
@@ -788,37 +633,7 @@ cursor over `.skip(n)` once page depth matters, since skip's cost (both
 read-unit and, to a lesser extent, latency) genuinely grows with depth here,
 given the `_id` index this collection is seeded with. Without that index,
 this distinction disappears entirely (both strategies degrade to the same
-full-collection-scan cost on every page) — same root cause as lab 4, an
-index that supports the query's sort/filter, showing up again at read-depth
-instead of at query-shape.
-
-**Trap to watch for:** a trainee who runs the default `--page-size 500`
-comparison and only looks at wall-clock time will conclude pagination is
-strictly worse — correct for this dataset's *total wall time*, misleading if
-generalized. Push on *why* you'd paginate a collection that already fits
-comfortably in memory. A second trap: a trainee who checks latency but not
-read units may underrate the skip/limit-vs-keyset gap, since latency's
-depth-growth is subtler than the read-units column at `--page-size 500`.
-
-**Nudge, don't tell:** `--pagination keyset` adds the third row; the
-script doesn't say skip/limit degrades with depth or that keyset is "the
-fix" — let the trainee compare first-vs-last page numbers themselves,
-across both latency and read units, before concluding anything.
-
-**Identification beyond this script:** grep a real codebase for `.skip(`
-(or `.offset(` in Native-mode code) as a quick audit signal, and watch for
-high "documents read" relative to a small result set actually returned in
-billing/monitoring — the same read-vs-returned gap lab 4 covers for query
-filtering, showing up here for pagination depth instead.
-
-**Note:** this database has `firestoreDataAccessMode:
-DATA_ACCESS_MODE_DISABLED` — only the MongoDB-compatible driver can read
-data. Native-mode tooling (e.g. `firestore-mcp`'s `list_documents`) fails
-with `Access to this database via the Firestore in Native mode API is
-disabled`, though admin-plane calls like `list_indexes` still work and
-confirm there's exactly one index (`_id_1`) behind both pagination
-scenarios — the read-units gap above is about how each query walks that
-index, not a missing-index story.
+full-collection-scan cost on every page).
 
 **Official guidance:** Google's own latency-troubleshooting reference lists
 "Large reads that return many documents" as a latency cause with the
@@ -869,9 +684,7 @@ can beat. **Don't present the "10 beats 500, bulk beats batch" ordering as
 a fact this script will confirm — it's the opposite of what it measures for
 a non-contended bulk load, and that's the actual lesson**: the general
 heuristic's mechanism is contention-avoidance, so it applies when writes
-conflict, not automatically to every bulk-write scenario. A trainee who
-wants to see the classic ordering should look back at lab 1 or 5, where
-writes *do* overlap on the same narrow key range.
+conflict, not automatically to every bulk-write scenario.
 
 **Fix / framing for trainees:** for a genuinely non-contended bulk load
 (unique keys, no conflicts), batch as large as your atomicity requirements
@@ -880,21 +693,7 @@ batches or many parallel individual writes if nothing is contending. Reach
 for bulk-parallel individual writes specifically when either (a) you need
 failure isolation (one bad doc shouldn't abort the other 999), or (b) the
 writes *do* contend and a large atomic batch would serialize/abort under
-that contention — situations orthogonal to raw round-trip-count
-minimization.
-
-**Trap to watch for:** a trainee may try to "fix" this result by increasing
-`--batch-sizes` further and generalize "bigger is always better" — worth
-having them push batch size well past 500 (the doc's own reference point)
-to see whether/where the trend reverses (very large single-batch payloads
-have their own size and latency ceilings), rather than accepting either
-extreme as universal.
-
-**Nudge, don't tell:** `--batch-sizes 5,50,1000` (or any other set) is the
-only flag — it doesn't hint at what the "right" ceiling is, or that the
-ordering will differ from the general guidance. Let the trainee discover
-the inversion themselves and reason about why before you explain
-contention as the missing variable.
+that contention.
 
 **Worth knowing, not isolated as a variable in this script's own numbers:**
 every document here is inserted without setting `_id`, so the driver
