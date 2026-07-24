@@ -736,15 +736,3 @@ knowing for Q&A, even though no script here reproduces them directly:
   indexes multiplies write cost across all of them. If a trainee has real
   production indexes to review, the useful question is whether they're all
   still queried, not just whether they were once useful.
-- **High index fanout — Standard Edition only, not applicable to this lab.**
-  Standard-edition Firestore indexes nearly every field by default, so
-  documents with many indexed fields or large arrays/maps pay a write-time
-  "fanout" cost across all of them. This lab runs Enterprise edition
-  throughout, where this specific mechanism doesn't apply the same way —
-  worth knowing if you support Standard-edition customers elsewhere, not
-  something to demo here.
-
-If you have access, the internal **Anti-pattern Analyser Colab** and **Key
-Visualizer** (Cloud Console) are the standard tools for spotting all of the
-hotspot-shaped anti-patterns above (and labs 1/3/5) from a real customer's
-production traffic, rather than a live workshop measurement.
