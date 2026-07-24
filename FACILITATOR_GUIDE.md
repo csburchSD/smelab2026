@@ -2,9 +2,9 @@
 
 Setup, architecture, and the answer key, all in one place. Don't hand this
 to trainees — give them `LAB_GUIDE.md` instead; it has no fixes given away.
-Symptom numbers below were measured against a live database
-on 2026-07-14 (or `labdb1`/other databases where noted for labs added
-later); re-running will vary but the relative shape should hold.
+Symptom numbers below are from real measurements against a live database
+(the specific database is noted per lab where it matters); re-running will
+vary but the relative shape should hold.
 
 ## Architecture, in one paragraph
 
@@ -75,9 +75,9 @@ section below for how to use it as a nudge without giving away the fix.
   you'll see a raw `gcloud` billing-not-configured error partway through.
   (The Firestore API itself doesn't need enabling by hand: `provision_lab.py`
   calls `gcloud services enable firestore.googleapis.com` on every run,
-  before it tries to create anything -- confirmed necessary live, on a
-  brand-new project where `gcloud`'s own "enable it now?" prompt turned out
-  to default to declining even under `--quiet`.)
+  before it tries to create anything. This matters because `gcloud`'s own
+  "enable it now?" prompt defaults to declining even under `--quiet`, so a
+  brand-new project would otherwise fail with a `SERVICE_DISABLED` error.)
 - `gcloud` CLI, authenticated (`gcloud auth login`) against that project,
   with **more than just a Firestore-scoped role**. `provision_lab.py` also
   calls `gcloud projects add-iam-policy-binding` to grant the new SCRAM user
@@ -134,8 +134,8 @@ confirm write access, and (if reusing a `--database-id` that was decommissioned
 moments earlier) waiting out gcloud's reuse cooldown before it'll let you
 recreate a database under the same ID.
 
-If propagation takes longer than that ~2-minute budget (observed directly:
-it can), the script gives up waiting, skips seeding, and tells you to run
+If propagation takes longer than that ~2-minute budget, the script gives up
+waiting, skips seeding, and tells you to run
 `python provision_lab.py --reset` yourself once access is confirmed -- so
 "one command" above is the common case, not a guarantee. `.env` is already
 written at that point either way.
@@ -180,18 +180,16 @@ YOUR_PROJECT_ID --format='value(projectNumber)'`.
 
 **`roles/datastore.owner`, not `roles/datastore.user`:** every lab script
 that uses a scratch collection (and `setup_lab.py` itself) calls
-`coll.drop()`. `roles/datastore.user` (23 permissions) doesn't cover
-collection/index administration and `drop()` fails with `PermissionDenied`
-no matter how long you wait for propagation — confirmed directly with
-`gcloud iam roles describe roles/datastore.user`, and by comparing against
-a role that has 63 permissions and works. `roles/datastore.owner` is what
-this lab actually needs.
+`coll.drop()`. `roles/datastore.user` doesn't cover collection/index
+administration, so `drop()` fails with `PermissionDenied` no matter how long
+you wait for propagation. `roles/datastore.owner` is what this lab actually
+needs.
 
-**Gotcha hit while building this lab:** a SCRAM user can authenticate
-successfully immediately, but every read/write fails with
-`PermissionDenied` until the IAM binding above finishes propagating — this
-took a couple of minutes in practice. Don't assume the binding command
-failed if the very next write attempt still 403s; retry after a short wait.
+**IAM propagation delay:** a SCRAM user can authenticate successfully
+immediately, but every read/write fails with `PermissionDenied` until the
+IAM binding above finishes propagating — typically a couple of minutes.
+Don't assume the binding command failed if the very next write attempt
+still 403s; retry after a short wait.
 
 ### 6. Build the connection string
 
@@ -273,15 +271,14 @@ don't match — see the region note under "Fast path" above.
 (the operator that atomically increments a numeric field) by many
 concurrent callers (e.g. a naive global page-view counter).
 
-**Symptom (`01_lab_counters.py`):** the script now reports only the median
-(p50) latency per scenario, on purpose — it used to also show wall-clock,
-max, and ops/sec, but those turned out to be routinely dominated by a single
-outlier op unrelated to contention (see caveat below), which buried the
-actual signal. Median still shows it clearly: 20 concurrent writers doing
-100 total `$inc` ops against one shared document run materially slower than
-the same 100 ops spread across 20 documents (measured: ~95ms hot vs. ~14ms
-cold). Firestore serializes writes to a single document; concurrent writers
-queue behind each other.
+**Symptom (`01_lab_counters.py`):** the script reports only the median (p50)
+latency per scenario — wall-clock, max, and ops/sec are dominated by a
+single outlier op unrelated to contention (see caveat below), so they'd
+bury the actual signal here. Median shows it clearly: 20 concurrent writers
+doing 100 total `$inc` ops against one shared document run materially
+slower than the same 100 ops spread across 20 documents (measured: ~95ms
+hot vs. ~14ms cold). Firestore serializes writes to a single document;
+concurrent writers queue behind each other.
 
 **Caveat worth knowing before a trainee asks about it:** the COLD scenario
 reproducibly shows one very slow op (~5.0-5.1s, consistent across repeated
@@ -316,10 +313,9 @@ Concurrent writers to the same document collide at commit time; the backend
 retries internally, and if it can't get a clean commit it hard-fails with
 `ABORTED: Too much contention on these documents`. Since `retryWrites=false`
 is required on this connection, the driver never auto-retries that (or any
-transient failure) — the app must. `01_lab_counters.py` now
-catches and counts these instead of crashing on the first one, and calls
-them out explicitly (only when they actually happen, not as a permanent
-column) since that's a real result, not noise; at this lab's default
+transient failure) — the app must. `01_lab_counters.py` catches and counts
+these, calling them out explicitly (only when they actually happen, not as
+a permanent column) since that's a real result, not noise; at this lab's default
 concurrency (20 writers × 5 ops) the backend's internal retries absorb the
 contention and no errors surface — push `WRITERS`/`OPS_PER_WRITER` higher to
 see the abort rate climb.
@@ -369,8 +365,8 @@ BSON document sizes up to 16793598 bytes`. That's the real ceiling this
 pattern eventually hits, not a script bug. (Worth knowing the ceiling
 differs by edition: Standard/Native-mode Firestore documents cap at 1 MiB;
 this lab's Enterprise MongoDB-compatible API caps at ~16 MiB, matching
-MongoDB's own BSON limit — confirmed directly above. Either way, the fixes
-below apply regardless of which ceiling you're up against.)
+MongoDB's own BSON limit, as shown by the error above. Either way, the
+fixes below apply regardless of which ceiling you're up against.)
 
 **Fix — Google's general Firestore guidance names three patterns here
 (separate documents/subcollections, bucketing, TTL expiry). One caveat
@@ -467,7 +463,7 @@ counter as `_id` (`evt-000000000042`, SEQUENTIAL), a random UUID4 `_id`
 (SALTED, `--shard-prefixes N`, default N=3) -- unlike every other lab's
 "optional" flag, SALTED is shown by default here rather than hidden behind
 one, a deliberate choice to surface the fix directly instead of leaving it
-for a trainee to discover (confirmed with the requester).
+for a trainee to discover.
 
 **Lead with the mechanism, not the table:** Firestore stores keys
 **lexicographically**. A monotonically increasing `_id` means every new
@@ -515,7 +511,7 @@ vs. ~1,087 ops/sec (random) with sequential showing a notably fatter tail
 (p95 115ms / max 450ms vs. p95 30ms / max 116ms random) at only 300 ops per
 scenario and 20 concurrent writers.
 
-**Important caveat, confirmed via extensive live testing:** this lab hits
+**Important caveat:** this lab hits
 the same reproducible ~5-10s single-op startup artifact described under lab
 1 above, but here it's **not deterministically avoidable** by warming up
 first -- the same warm-up code has produced both a clean run and a run
@@ -643,7 +639,7 @@ gcloud firestore indexes composite create \
     --field-config=field-path=price,order=ascending
 ```
 
-Verified live against this lab's `lab_bookings` — it drops `docs examined`
+Against this lab's `lab_bookings`, this drops `docs examined`
 to 20 (from 12,000) and read units to 23. Two non-obvious flags: `--api-scope
 =mongodb-compatible-api` is required (the default `any-api` scope is
 rejected for this index shape), and it must be paired with
@@ -671,14 +667,9 @@ only the final stage timed).
 
 **Explicitly caveated in the script itself:** this is a proxy for a rule
 normally observed over minutes, not a literal reproduction of the
-timescale. The *mechanism* is the same one this lab already measured
-directly while fixing `01_lab_counters.py`'s own benchmark
-earlier in development: a key range's first exposure to real concurrency
-pays a one-time backend routing/warm-up cost that an already-exercised
-range doesn't (see `01`'s `run_spread()` and its comment — a single
-sequential touch-per-doc wasn't enough to clear that cost; a full
-concurrent warm-up burst was, dropping p95 from ~900ms to ~60ms in that
-script's diagnostic).
+timescale. The *mechanism* is the same one described under lab 1's caveat
+above: a key range's first exposure to real concurrency pays a one-time
+backend routing/warm-up cost that an already-exercised range doesn't.
 
 **Symptom (measured on `labdb1`):** SPIKE: wall 1.526s, p95 1268ms, max
 1510ms, est. 31.5 ops/sec. RAMP final stage (identical shape): wall 0.662s,
@@ -820,23 +811,14 @@ high "documents read" relative to a small result set actually returned in
 billing/monitoring — the same read-vs-returned gap lab 4 covers for query
 filtering, showing up here for pagination depth instead.
 
-**Confirmed via `firestore-mcp` (admin API, not the disabled native Documents
-API):** `list_indexes` on `projects/base92124/databases/firestore-lab/collectionGroups/lab_bookings`
-returns exactly one index — `_id_1` (ascending, `apiScope:
-MONGODB_COMPATIBLE_API`). Both scenarios read through that same single index,
-so the read-units gap isn't a missing-index story; it's how each query walks
-it. `skip(n)` still has the engine step through and discard `n` index entries
-before it can return a page, so backend work — and therefore read units —
-scales with `n` (511 → 750 across 24 pages at `--page-size 500`). The keyset
-range condition (`{_id: {$gt: last_id}}`) seeks the index straight to
-`last_id`, so its backend work per page is constant (511 flat) regardless of
-depth. Note `list_documents` against this database fails with `Access to this
-database via the Firestore in Native mode API is disabled` — this database
-was created with `mongodbCompatibleDataAccessMode: DATA_ACCESS_MODE_ENABLED`
-/ `firestoreDataAccessMode: DATA_ACCESS_MODE_DISABLED`, so only the
-MongoDB-compatible driver can read data; `firestore-mcp` is still useful here
-for admin-plane metadata (indexes, database config) even though it can't read
-documents directly.
+**Note:** this database has `firestoreDataAccessMode:
+DATA_ACCESS_MODE_DISABLED` — only the MongoDB-compatible driver can read
+data. Native-mode tooling (e.g. `firestore-mcp`'s `list_documents`) fails
+with `Access to this database via the Firestore in Native mode API is
+disabled`, though admin-plane calls like `list_indexes` still work and
+confirm there's exactly one index (`_id_1`) behind both pagination
+scenarios — the read-units gap above is about how each query walks that
+index, not a missing-index story.
 
 **Official guidance:** Google's own latency-troubleshooting reference lists
 "Large reads that return many documents" as a latency cause with the

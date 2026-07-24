@@ -80,9 +80,10 @@ touching when it starts, so you always know what to go poke at directly.
 ## MongoDB compatibility notes
 
 This is a real MongoDB-compatible API, not a MongoDB clone or Firestore
-Native mode with different syntax — most things behave exactly like
-community MongoDB. A few things don't, and they're exactly the kind of
-gotcha worth knowing going in rather than losing time to mid-exercise.
+Native mode with different syntax — most things behave exactly like real
+MongoDB, whether that's MongoDB Community, MongoDB Enterprise Advanced, or
+MongoDB Atlas. A few things don't, and they're exactly the kind of gotcha
+worth knowing going in rather than losing time to mid-exercise.
 
 **If you know MongoDB:**
 - **`retryWrites=false` is required, not the default.** The driver never
