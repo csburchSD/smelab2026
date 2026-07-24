@@ -77,6 +77,45 @@ Scripts 5 and 7 don't use any of the above — they create and drop their own
 scratch collections each run. Each script prints which collection(s) it's
 touching when it starts, so you always know what to go poke at directly.
 
+## MongoDB compatibility notes
+
+This is a real MongoDB-compatible API, not a MongoDB clone or Firestore
+Native mode with different syntax — most things behave exactly like
+community MongoDB. A few things don't, and they're exactly the kind of
+gotcha worth knowing going in rather than losing time to mid-exercise.
+
+**If you know MongoDB:**
+- **`retryWrites=false` is required, not the default.** The driver never
+  auto-retries a failed write — every write-issuing script in this lab
+  catches the error itself instead of relying on the driver. (Lab 1)
+- **No default `_id` index.** Real MongoDB auto-creates one on every
+  collection; this backend doesn't — `coll.index_information()` returns
+  `{}` until one is created. (Lab 6)
+- **Every write is already an implicit transaction.** Concurrent writes to
+  the same document use optimistic concurrency control (OCC) with snapshot
+  isolation, not MongoDB's default pessimistic per-document locking —
+  collisions are retried internally and, if they can't get a clean commit,
+  hard-fail with `ABORTED`, rather than queuing behind a lock. (Lab 1)
+- **`collMod: expireAfterSeconds` isn't supported.** To change a TTL
+  index's retention window, drop and recreate the index with the new value
+  — you can't modify one in place. (Lab 2)
+- **Billing is per Read Unit** (data *scanned*, at 4 KiB granularity, not
+  data *returned*), not a MongoDB Atlas-style compute/storage model. (Labs
+  4 and 6)
+
+**If you know Firestore's Native/Datastore mode instead:**
+- **No subcollections.** A document nesting its own collection is a
+  Native-mode-only concept — everything here is a flat, top-level
+  collection. (Lab 2)
+- **Auto-generated `_id` isn't fully random.** If you omit `_id` on insert,
+  this driver assigns a BSON `ObjectId` (same as real MongoDB), not Native
+  mode's fully-random auto-ID — an `ObjectId`'s leading 4 bytes are a Unix
+  timestamp, so IDs inserted in the same second still share a prefix. (Lab 3)
+
+None of this needs memorizing up front — it's here so that if something
+behaves unexpectedly, you can check this list before assuming your own code
+is wrong.
+
 ## Reproducing each anti-pattern
 
 Run each base command to see the symptom for yourself before (and after) you
@@ -134,6 +173,49 @@ A few prompts worth trying along the way -- notice these ask you to explain
   pagination actually protect against?"
 - "What's the difference between a batched write and a bunch of parallel
   individual writes, and when would you want one over the other?"
+
+## Reference: two patterns worth understanding (read after you've tried labs 1 and 2)
+
+This section names two patterns directly, on purpose — not to skip the
+exercise, but because a pre-lab survey found these were the two
+lowest-confidence topics on the team, even after doing the lab. Try labs 1
+and 2 yourself first; come back here to check your own fix against the
+general pattern, or if you're stuck on the concept itself rather than just
+this lab's specific numbers.
+
+**Sharded (distributed) counter, for a hot document under concurrent writes
+(lab 1):** instead of one document taking every increment, maintain N
+separate "shard" documents (e.g. `global_stats_shard_0` through
+`global_stats_shard_9`). Each write picks a random shard and increments that
+one instead of a single shared document — spreading the same total write
+volume across N independent documents that don't contend with each other.
+Reading the total means reading all N shards and summing them, which is the
+real trade-off: you've turned one cheap read into N reads to get the same
+number. More shards means less write contention but a more expensive read;
+the right N depends on your actual write rate, not a fixed rule. This is the
+standard fix for any single "hot" document under concurrent writes, not
+just counters — the same idea applies to any field every request needs to
+update.
+
+**Bucket pattern, for an unbounded array embedded in one document (lab
+2):** instead of appending forever to one array field in one document,
+split the growing data across multiple documents — one per time window
+(e.g. per day) or one per N items, whichever matches how the data is
+actually read back. Each bucket document has a natural size ceiling by
+construction, so no single document grows without bound, and each append is
+a write to whichever bucket is currently open, not a rewrite of the whole
+history. The trade-off is the same shape as sharded counters: reading "all
+of a device's history" now means reading multiple bucket documents instead
+of one, and you generally want to keep a small, bounded summary (the latest
+value, a running total) in a separate always-cheap-to-read document rather
+than paying that multi-document cost for the common case.
+
+Both patterns share the same underlying trade-off: **you're trading one
+cheap, unbounded-risk operation for several bounded, safer ones.** That
+trade only pays off when the unbounded version was actually going to be a
+problem — sharding a counter nobody writes to concurrently, or bucketing an
+array that never grows past a few dozen items, just adds complexity for
+nothing.
 
 ## Resetting
 
