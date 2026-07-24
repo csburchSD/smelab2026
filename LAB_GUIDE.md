@@ -105,7 +105,7 @@ own working theory for each collection, not just a number in a table.
 |---|---|---|---|---|
 | 1 | `lab_counters` | Write latency vs. document count under the same total concurrent load | | |
 | 2 | `lab_devices` | Document size / write latency vs. array length | | |
-| 3 | `lab_events` | Insert latency vs. `_id` key strategy | | |
+| 3 | `lab_events` | Insert latency (and latency drift across a run) vs. `_id` key strategy | | |
 | 4 | `lab_bookings` | Query cost vs. index coverage (`explain()`) | | |
 | 5 | `lab_traffic_scratch` | Latency vs. how traffic arrives (all at once vs. staged) | | |
 | 6 | `lab_bookings` | Read cost/latency vs. fetch strategy | | |
@@ -122,8 +122,10 @@ A few prompts worth trying along the way -- notice these ask you to explain
   explain a gap like this?"
 - "Here's how this document's size and write latency changed as its array
   grew -- what's driving that, and where does it stop being viable?"
-- "Here's the insert latency I measured across different `_id` key
-  strategies -- what would explain the differences?"
+- "Here's the insert latency (and each scenario's latency drift across its
+  own run) I measured across different `_id` key strategies -- what would
+  explain the differences, and why might a monotonic key still be risky in
+  production even if my numbers here don't show a clean gap?"
 - "What is the ESR (Equality, Sort, Range) rule for compound indexes, and does
   the index I just created follow it?"
 - "Here's how the same total traffic behaved arriving all at once vs. ramped

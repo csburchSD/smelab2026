@@ -284,18 +284,13 @@ cold). Firestore serializes writes to a single document; concurrent writers
 queue behind each other.
 
 **Caveat worth knowing before a trainee asks about it:** the COLD scenario
-reproducibly shows one very slow op (~5.0-5.1s, essentially the same value
-across repeated runs, not random noise) that used to dominate the old
-wall-clock/max columns while never showing up as an error (writes still
-succeed) or moving the median. Leading theory, not yet fully confirmed:
-`run_spread()` always executes before `run_hot()` in a fresh process, so
-whichever scenario runs first likely eats a one-time pymongo connection-pool
-growth cost (the client going from a handful of sockets up to
-`WRITERS`-many concurrent ones for the first time) — that would land on
-COLD by construction, regardless of anything about contention. If a trainee
-reports this, it's a legitimate observation worth discussing, not a sign
-their measurement is broken; median is what the lab's actual comparison
-rests on, precisely because it isn't sensitive to this kind of one-off.
+reproducibly shows one very slow op (~5.0-5.1s, consistent across repeated
+runs, not random noise) that never errors and never moves the median, but
+used to dominate the old wall-clock/max columns. Best guess: `run_spread()`
+always runs first in a fresh process, so it likely eats a one-time
+connection-pool growth cost unrelated to contention. If a trainee reports
+this, it's a legitimate observation, not a broken measurement — median is
+immune to it, which is exactly why the script reports only median.
 
 **Fix:** shard the counter. Maintain N separate shard documents (e.g.
 `global_stats_shard_0..9`), write to a randomly chosen shard per increment,
@@ -336,6 +331,25 @@ trainee is stuck on *how* to test "spreading it out," point them at the
 flag; let them discover on their own that N=1 is the hot case, and that
 summing shards to read a total is a problem they still have to solve.
 
+**Identification, if you have Key Visualizer access:** a hot single document
+shows up as one thin, bright horizontal line in Key Visualizer's writes
+heatmap — one row getting hit far harder than its neighbors. Elevated
+`ABORTED`/`DEADLINE_EXCEEDED` rates against one specific document path in
+application logs are the same signal without needing Key Visualizer access.
+Labs 3 and 5 below use the same tool for a different-shaped hotspot (a
+moving edge or a whole narrow range, instead of one fixed row).
+
+**Related, not reproduced by this script:** client-side debouncing/batching
+(buffer non-critical updates and flush periodically instead of writing on
+every event) is a legitimate complementary fix when writes don't need
+per-event durability. Separately, **large multi-document transactions** are
+a related contention risk this lab doesn't exercise directly (every op here
+is a single-document `update_one`) — the same principle extends to explicit
+transactions: keep them narrowly scoped to what actually needs atomicity,
+move reads/computation that don't need it outside the transaction, and
+prefer a plain batched write (`bulk_write`/`insert_many`, see lab 7) over a
+transaction whenever nothing in the batch needs to be read back first.
+
 ---
 
 ## 2. Unbounded Array Growth — `lab_devices`
@@ -352,7 +366,11 @@ with existing array size (measured: 0 readings → 0.3 KB
 builds a scratch document with 120,000 readings (~16.6 MB) and shows it
 **fails outright** — `DocumentTooLarge: BSON document too large ... supports
 BSON document sizes up to 16793598 bytes`. That's the real ceiling this
-pattern eventually hits, not a script bug.
+pattern eventually hits, not a script bug. (Worth knowing the ceiling
+differs by edition: Standard/Native-mode Firestore documents cap at 1 MiB;
+this lab's Enterprise MongoDB-compatible API caps at ~16 MiB, matching
+MongoDB's own BSON limit — confirmed directly above. Either way, the fixes
+below apply regardless of which ceiling you're up against.)
 
 **Fix — Google's general Firestore guidance names three patterns here
 (separate documents/subcollections, bucketing, TTL expiry). One caveat
@@ -413,6 +431,12 @@ collection, not a nested one.**
    unsupported here — to change the retention window later, drop and
    recreate the index with the new value, don't reach for `collMod`.
 
+4. **Offload genuinely large payloads to object storage.** If what's
+   growing isn't "a long list of small readings" but actual large blobs
+   (images, files, long text), store the blob in Cloud Storage and keep only
+   a reference URL in the Firestore document — this sidesteps the
+   document-size ceiling entirely rather than working around it.
+
 Either way, embed only a small, bounded summary (e.g. `last_reading`) in the
 parent device document for the common "give me the latest value" read —
 don't make that read pay for a join/second query just to avoid the
@@ -445,32 +469,81 @@ counter as `_id` (`evt-000000000042`, SEQUENTIAL), a random UUID4 `_id`
 one, a deliberate choice to surface the fix directly instead of leaving it
 for a trainee to discover (confirmed with the requester).
 
+**Lead with the mechanism, not the table:** Firestore stores keys
+**lexicographically**. A monotonically increasing `_id` means every new
+write lands at the same, constantly-advancing edge of that lexicographic
+order, concentrating write volume on a limited number of Spanner tablets
+(the storage layer underneath Firestore) instead of spreading it across
+ranges the backend already knows about — the internal reason behind
+Google's own "avoid sequential keys" guidance. A randomized or salted key
+has no single "latest" edge to concentrate on. This is true regardless of
+what any one lab run's numbers show -- treat that as the takeaway trainees
+should walk away with, and the measurements below as supporting evidence,
+not the proof itself. (This mirrors how lab 6 frames its own
+counterintuitive numbers: the mechanism is real even on a run where the raw
+comparison doesn't show it cleanly.)
+
+**Identification, if you have Key Visualizer access:** look for a bright,
+concentrated band advancing along one edge of the writes heatmap, as
+opposed to lab 1's fixed single-row line — same tool, applied to a moving
+hotspot instead of a static one.
+
+**A MongoDB-specific wrinkle worth flagging:** if a trainee suggests "just
+don't set `_id`, let the driver generate one" as the fix, point out that
+this API's driver-default (a BSON `ObjectId`) is **not** the same as
+Native-mode Firestore's fully-random auto-ID — an `ObjectId`'s leading 4
+bytes are a Unix timestamp, so documents inserted in the same second still
+share that prefix, giving driver-default IDs a mild version of the same
+moving-edge problem. That's exactly why this script's RANDOM scenario
+explicitly uses `uuid4()` rather than omitting `_id` and relying on the
+driver default — worth surfacing as the more precise fix if a trainee
+reaches for "just let the driver handle it."
+
+**Related, not reproduced by this script:** the same lexicographic-hotspot
+mechanism also hits **indexed field values**, not just `_id` — e.g. a
+`createdAt` timestamp field that's indexed and constantly written with
+"now," or a `status` field where most documents share one of a few values.
+The fix family is the same (avoid ever-increasing or narrowly-clustered
+indexed values under high write rates); Native/Datastore mode also offers a
+single-field index exemption for fields that never need to be queried or
+sorted on, but that's **not confirmed to have an equivalent in this
+MongoDB-compatible API** — check the compatibility docs before promising a
+trainee that `coll.create_index(...)` here has the same escape hatch.
+
 **Symptom:** historically measured throughput was ~658 ops/sec (sequential)
 vs. ~1,087 ops/sec (random) with sequential showing a notably fatter tail
 (p95 115ms / max 450ms vs. p95 30ms / max 116ms random) at only 300 ops per
 scenario and 20 concurrent writers.
 
-**Important caveat, confirmed via extensive live testing:** this backend (or
-something about the Cloud Shell/GCE environment running the script) pays an
-unpredictable ~5-10s cost on a single op the first time real concurrent load
-hits a given region of the keyspace -- reproducible, but **not
-deterministically avoidable**: the same warm-up code has produced a clean
-run and a run where SEQUENTIAL alone still ate the cost, back-to-back, with
-nothing else different. `03_lab_events.py`'s `warm_up()` targets this
-best-effort (one random-keyed burst, one `next_sequential_id()` burst, since
-a random-keyed warm-up alone does *not* clear it for SEQUENTIAL -- uuid4()
-keys and `evt-<counter>` keys occupy non-overlapping regions of the
-keyspace) but can't guarantee it every run. **If a trainee reports one
+**Important caveat, confirmed via extensive live testing:** this lab hits
+the same reproducible ~5-10s single-op startup artifact described under lab
+1 above, but here it's **not deterministically avoidable** by warming up
+first -- the same warm-up code has produced both a clean run and a run
+where SEQUENTIAL alone still ate the cost, back-to-back. `warm_up()`
+targets it with two bursts, not one, because a random-keyed burst alone
+does *not* clear it for SEQUENTIAL (`uuid4()` keys and `evt-<counter>` keys
+occupy non-overlapping regions of the keyspace). **If a trainee reports one
 scenario with a wildly elevated max/wall-clock relative to its own p50,
-that's very likely this artifact, not a real result** -- have them rerun
-rather than draw a conclusion from it. p50 is the metric least affected by
-it (a single outlier among hundreds of ops doesn't move the median).
-Separately, at the default 300-op scale, live testing repeatedly found *no*
-reliable p50/p95 gap between SEQUENTIAL/RANDOM/SALTED at all once the
-above artifact is accounted for -- `--ops-per-writer N` sustains load over a
-longer window (e.g. `--ops-per-writer 500` for 10k ops/scenario) if you want
-to test whether a genuine gap emerges at real scale rather than relying on
-the historical numbers above.
+that's very likely this artifact** -- have them rerun rather than draw a
+conclusion from it; p50 is immune to it. Separately, at the default 300-op
+scale, live testing found *no* reliable p50/p95 gap between the three
+scenarios once the artifact is accounted for -- `--ops-per-writer N`
+sustains load over a longer window (e.g. `--ops-per-writer 500`) if you
+want to test for a gap at real scale.
+
+**The "Drift" column exists because of exactly that gap:** rather than only
+comparing scenarios' overall latency to each other (vulnerable to the
+startup artifact landing differently in each scenario), each row also
+reports its own second-half p50 vs. first-half p50, within that one
+scenario's run -- a monotonic key's hot edge getting harder to serve as it
+accumulates writes should show up as SEQUENTIAL's drift trending positive
+while RANDOM/SALTED stay near 0%, even on a run where the cross-scenario
+comparison is a wash. Both halves' medians are independently immune to the
+one-off startup outlier landing in either half, so this reads cleanly
+regardless of the artifact above. If a trainee sees flat drift across all
+three scenarios even at a pushed-up `--ops-per-writer`, that's a legitimate
+result at this lab's achievable scale -- fall back to the mechanism
+explanation above rather than treating it as a broken measurement.
 
 **Fix:** don't use a raw auto-increment or raw timestamp as the primary
 write key for high-throughput writes. Either randomize (UUID, hash prefix)
@@ -585,7 +658,10 @@ scope.`
 
 **Setup:** Firestore's 500/50/5 guidance: start under ~500 ops/sec to a
 collection, then grow by no more than ~50% every ~5 minutes so the backend
-can auto-scale ahead of demand. A narrow document range under heavy
+can auto-scale ahead of demand. (Enterprise edition specifically handles
+higher bursts than these numbers suggest, per Google's own docs — treat
+500/50/5 as the safe general guideline worth teaching, not a hard ceiling
+this particular edition enforces.) A narrow document range under heavy
 read/write/delete rates ("hot-spotting") limits how well that scaling can
 keep up, regardless of ramp rate. `05_lab_traffic_scratch.py` compresses
 this into seconds: it hits the *same* 30-document scratch range with the
@@ -614,11 +690,9 @@ reads (SPIKE p95 1110ms/max 1245ms/est. 36.0 ops/sec vs. RAMP p95 392ms/max
 a write-side story here.
 
 **Why "est. ops/sec" and not p50 or wall-clock, and a caveat shared with labs
-1 and 3:** this script hits the same reproducible ~5-10s single-op latency
-artifact documented under lab 1 and lab 3 below — a fixed cost the backend
-pays the first time real concurrent load touches a given region of the
-keyspace, not something either scenario here "does wrong." Live testing
-found p50 alone actually **flips direction** run to run here (it favored
+1 and 3 above:** this script hits the same reproducible startup artifact
+documented there, not something either scenario here "does wrong." Live
+testing found p50 alone actually **flips direction** run to run here (it favored
 SPIKE, backwards from the lesson, in at least one clean run with no artifact
 contamination at all), because this lab's real effect — a spike queuing
 behind a not-yet-scaled range — shows up specifically as *tail* latency, not
@@ -649,6 +723,20 @@ continuously as an app grows. The lesson is the pattern, not this one range.
 you'd want to test reads separately — let a trainee arrive at "the rule
 says read/write/delete" on their own and confirm it holds for reads too.
 
+**Identification, if you have Key Visualizer access:** a narrow range under
+heavy traffic shows as a bright, concentrated block in the heatmap (the
+whole active range lighting up, not a single thin line like lab 1's hot
+document) — correlate with elevated `ABORTED`/`DEADLINE_EXCEEDED` rates in
+application logs for a Key-Visualizer-free version of the same signal. The
+internal Anti-pattern Analyser Colab, if you have access, automates spotting
+several of labs 1/3/5's hotspot shapes directly from Cloud Monitoring data.
+
+**One cause this lab doesn't reproduce directly:** a high **delete** rate
+against a narrow range is the same mechanism with the traffic direction
+reversed. If a trainee's own system needs bulk cleanup, prefer a TTL policy
+(automatic, backend-paced) or a soft-delete flag processed gradually in the
+background over a tight loop of deletes against adjacent keys.
+
 ---
 
 ## 6. Large Reads That Return Many Documents — `lab_bookings`
@@ -662,6 +750,13 @@ real MongoDB, does **not** auto-create a default `_id` index), and every
 paginated fetch below falls back to a full `COLLSCAN` + in-memory sort
 regardless of strategy, masking the exact comparison this lab is about. With
 the index seeded, the two pagination strategies genuinely diverge -- see below.
+
+**This lab is literally two named anti-patterns at once:** UNPAGINATED is
+Google's own "queries without limits" anti-pattern (an unbounded `find({})`
+with no `.limit()`), and PAGINATED skip/limit is "offset in pagination"
+(`.skip(n)` is this API's equivalent of Native mode's `.offset()`) — both
+documented causes of ballooning read cost as a collection grows. Worth
+naming both explicitly if a trainee wants the official terminology.
 
 **Symptom (measured on `firestore-lab`, default `--page-size 500`, 24 pages):**
 UNPAGINATED: 1 round trip, wall 0.23s. PAGINATED skip/limit: 24 round trips,
@@ -718,6 +813,12 @@ depth-growth is subtler than the read-units column at `--page-size 500`.
 script doesn't say skip/limit degrades with depth or that keyset is "the
 fix" — let the trainee compare first-vs-last page numbers themselves,
 across both latency and read units, before concluding anything.
+
+**Identification beyond this script:** grep a real codebase for `.skip(`
+(or `.offset(` in Native-mode code) as a quick audit signal, and watch for
+high "documents read" relative to a small result set actually returned in
+billing/monitoring — the same read-vs-returned gap lab 4 covers for query
+filtering, showing up here for pagination depth instead.
 
 **Confirmed via `firestore-mcp` (admin API, not the disabled native Documents
 API):** `list_indexes` on `projects/base92124/databases/firestore-lab/collectionGroups/lab_bookings`
@@ -812,3 +913,57 @@ only flag — it doesn't hint at what the "right" ceiling is, or that the
 ordering will differ from the general guidance. Let the trainee discover
 the inversion themselves and reason about why before you explain
 contention as the missing variable.
+
+**Worth knowing, not isolated as a variable in this script's own numbers:**
+every document here is inserted without setting `_id`, so the driver
+assigns default BSON `ObjectId`s, which share a timestamp prefix for all
+documents inserted within the same second (see lab 3's note on this).
+Since all 1000 docs complete in a few seconds, this workload's own `_id`s
+are more lexicographically clustered than a random-UUID workload would be
+— and Google's own guidance says to keep documents in a high-rate bulk
+batch from being lexicographically close. Whether that measurably affects
+BULK's standing here specifically hasn't been tested live; flag it as an
+honest open question if a sharp trainee asks "wait, aren't these `_id`s
+kind of sequential too?" rather than asserting it doesn't matter.
+
+---
+
+## Related anti-patterns this lab suite doesn't reproduce
+
+A few more anti-patterns from Google's internal reference material are worth
+knowing for Q&A, even though no script here reproduces them directly:
+
+- **Skipping over many recently deleted documents (tombstones).** A query
+  that orders by an ever-growing field (e.g. `createdAt`) and only cares
+  about "live" rows — a task queue polling for `status == 'PENDING'` and
+  deleting on completion is the classic case — ends up scanning past index
+  tombstones for every already-deleted row before reaching live data, visible
+  as query latency degrading over time even though the live document count
+  stays flat. Fix: filter aggressively on an active-set field (e.g. index
+  `(status, createdAt)` and query `status == 'PENDING'`) instead of ordering
+  by the raw timestamp alone, or use TTL to age out old tombstones faster.
+- **Dynamic collection or field names in place of a shared schema** (e.g. a
+  collection per customer, `customer_283993`, instead of one `customers`
+  collection with a `customer_id` field; or a boolean field per tag,
+  `tag_cloud: true`, instead of a `tags: ["cloud"]` array). Multiplies index
+  metadata and can hit index-count limits fast. Fix: use a shared
+  collection/schema and differentiate with field values, not with dynamic
+  names.
+- **Composite index combinatorial explosion.** Every composite index
+  Firestore creates also implies "shadow" indexes for other sort-direction
+  combinations of the same fields — defining many overlapping composite
+  indexes multiplies write cost across all of them. If a trainee has real
+  production indexes to review, the useful question is whether they're all
+  still queried, not just whether they were once useful.
+- **High index fanout — Standard Edition only, not applicable to this lab.**
+  Standard-edition Firestore indexes nearly every field by default, so
+  documents with many indexed fields or large arrays/maps pay a write-time
+  "fanout" cost across all of them. This lab runs Enterprise edition
+  throughout, where this specific mechanism doesn't apply the same way —
+  worth knowing if you support Standard-edition customers elsewhere, not
+  something to demo here.
+
+If you have access, the internal **Anti-pattern Analyser Colab** and **Key
+Visualizer** (Cloud Console) are the standard tools for spotting all of the
+hotspot-shaped anti-patterns above (and labs 1/3/5) from a real customer's
+production traffic, rather than a live workshop measurement.

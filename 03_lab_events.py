@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """Lab 3: lab_events.
 
+Firestore's own guidance warns against monotonically increasing (or
+decreasing) keys for high-throughput writes: an auto-increment counter or an
+ISO timestamp used as the primary key means every new write lands at the
+same, constantly-advancing edge of the keyspace. The backend has to keep
+re-splitting that one edge to keep serving it as it grows, instead of
+spreading the work across ranges it already knows about. A randomized or
+salted key has no single "latest" edge to concentrate on, so there's nothing
+to re-split.
+
 lab_events is written to live by this script three ways:
   - SEQUENTIAL: every _id is a zero-padded, strictly increasing counter
     (the same shape as an auto-increment key or an ISO timestamp used
@@ -12,19 +21,33 @@ lab_events is written to live by this script three ways:
     writes across N ranges
 
 Default (no arguments): runs all three and reports insert latency/throughput
-for each. The collection is cleared once at the start of the run, then all
-three scenarios' documents accumulate together in lab_events (so you can
-inspect any of the _id sets afterward) -- it's not cleared between
-scenarios.
+for each, plus a "drift" column -- each scenario's own second-half p50
+latency compared to its first-half p50, within that same run. That's the
+more reliable signal to watch: a monotonic key's hot edge should get harder
+to serve as it accumulates more writes (drift trending up), while a
+randomized/salted key's load stays spread out and flat -- and unlike a
+straight cross-scenario comparison, a within-scenario drift isn't thrown off
+by the one-off startup latency artifact documented below (median is immune
+to a single outlier either way, but here it also means SEQUENTIAL isn't
+being compared against RANDOM/SALTED's own separate outlier risk). The
+collection is cleared once at the start of the run, then all three
+scenarios' documents accumulate together in lab_events (so you can inspect
+any of the _id sets afterward) -- it's not cleared between scenarios.
 
-Note: this script measures client-observed insert latency/throughput as
-a proxy signal. Treat the absolute numbers cautiously -- what matters is
-comparing scenarios against each other, not the raw milliseconds.
+Note: at this lab's workshop-safe scale, this backend can auto-scale fast
+enough that the *absolute* latency gap between scenarios isn't always
+visible run to run -- Firestore's hot-ranging guidance describes a
+production/sustained-throughput failure mode, not necessarily something a
+few thousand ops from one process reliably reproduces on demand. Treat the
+numbers here as a proxy signal for the mechanism, not a guarantee -- lean on
+understanding *why* a monotonic key is risky in production over expecting
+this script to prove it every single run.
 
-Your turn: try a different prefix count and see how it lands relative to
-the other rows:
+Your turn: try a different prefix count, or push the load higher and see if
+drift becomes clearer:
 
     python 03_lab_events.py --shard-prefixes N
+    python 03_lab_events.py --ops-per-writer 500
 """
 
 import argparse
@@ -85,7 +108,7 @@ def make_salted_id_factory(n):
 def timed_insert(coll, doc_id):
     start = time.perf_counter()
     coll.insert_one({"_id": doc_id, "payload": "x" * 200, "created_at": time.time()})
-    return time.perf_counter() - start
+    return start, time.perf_counter() - start
 
 
 def run_scenario(coll, id_factory, ops_per_writer=OPS_PER_WRITER):
@@ -95,8 +118,15 @@ def run_scenario(coll, id_factory, ops_per_writer=OPS_PER_WRITER):
             pool.submit(timed_insert, coll, id_factory())
             for _ in range(WRITERS * ops_per_writer)
         ]
-        latencies = [f.result() for f in futures]
+        results = [f.result() for f in futures]
     wall = time.perf_counter() - start
+    # f.result() above returns in submission order, not the order ops actually
+    # ran/finished -- sort by each op's own start time so "first half vs
+    # second half" below reflects chronological progress through the run, not
+    # submission order (the two mostly line up with a fixed worker pool, but
+    # this makes it exact).
+    results.sort(key=lambda r: r[0])
+    latencies = [latency for _, latency in results]
     return latencies, wall
 
 
@@ -120,7 +150,15 @@ def warm_up(coll):
 
 
 def summarize(name, latencies, wall):
-    ms = sorted(l * 1000 for l in latencies)
+    # latencies arrives in chronological (start-time) order from
+    # run_scenario -- keep a chronological copy for the drift split before
+    # sorting by value for the percentile columns.
+    ms_chrono = [l * 1000 for l in latencies]
+    ms = sorted(ms_chrono)
+    half = len(ms_chrono) // 2
+    first_half_p50 = statistics.median(ms_chrono[:half])
+    second_half_p50 = statistics.median(ms_chrono[half:])
+    drift_pct = (second_half_p50 - first_half_p50) / first_half_p50 * 100
     return {
         "scenario": name,
         "ops": len(ms),
@@ -129,6 +167,12 @@ def summarize(name, latencies, wall):
         "p95_ms": round(ms[int(len(ms) * 0.95) - 1], 1),
         "max_ms": round(ms[-1], 1),
         "ops_per_sec": round(len(ms) / wall, 1),
+        # 2nd-half p50 vs 1st-half p50, within this scenario's own run -- a
+        # monotonic key's hot edge getting harder to serve as it grows shows
+        # up as this trending positive; a spread-out key stays flat. Median
+        # of each half keeps this immune to the one-off startup artifact
+        # (see the module docstring) the same way p50 already is overall.
+        "drift_pct": round(drift_pct, 1),
     }
 
 
@@ -160,17 +204,22 @@ def main():
     table.add_column("p95 (ms)", justify="right")
     table.add_column("max (ms)", justify="right")
     table.add_column("ops/sec", justify="right")
+    table.add_column("Drift (2nd half vs 1st)", justify="right")
 
     for row in rows:
         table.add_row(row["scenario"], str(row["ops"]), str(row["wall_s"]),
                       str(row["p50_ms"]), str(row["p95_ms"]), str(row["max_ms"]),
-                      str(row["ops_per_sec"]))
+                      str(row["ops_per_sec"]), f"{row['drift_pct']:+.1f}%")
 
     console.print("\n")
     console.print(table)
     console.print(
         "\n[dim]Client-observed timing is a proxy signal here -- compare the scenarios "
-        "against each other rather than reading too much into the absolute numbers.[/]"
+        "against each other rather than reading too much into the absolute numbers. Drift "
+        "compares each scenario's own second-half p50 to its first-half p50 -- a monotonic "
+        "key's hot edge getting harder to serve as it grows should trend positive here even "
+        "on a run where the scenarios' overall latencies don't cleanly separate from each "
+        "other.[/]"
     )
 
 
