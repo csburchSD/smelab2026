@@ -60,21 +60,24 @@ against the same serverless Firestore Enterprise database named in
 `MONGO_URI`. None of them touch a self-hosted MongoDB cluster.
 
 Scripts 1-3 and 5-7 also accept a flag (`--docs`, `--test-sizes`,
-`--shard-prefixes`, `--mode`, `--pagination`/`--page-size`, `--batch-sizes`
-respectively) that turns them into a harness for testing a trainee's own
-hypothesis instead of just the built-in comparison — see each section below
-for how to use it as a nudge without giving away the fix.
+`--shard-prefixes`/`--ops-per-writer`, `--mode`, `--pagination`/`--page-size`,
+`--batch-sizes` respectively) that turns them into a harness for testing a
+trainee's own hypothesis instead of just the built-in comparison — see each
+section below for how to use it as a nudge without giving away the fix.
 
 ## Setting up a new environment
 
 ### 1. Prerequisites
 
-- A GCP project with the Firestore API enabled (`gcloud services enable
-  firestore.googleapis.com --project=YOUR_PROJECT_ID`) and billing linked
-  (`gcloud billing projects link YOUR_PROJECT_ID
-  --billing-account=YOUR_BILLING_ACCOUNT_ID`) -- `provision_lab.py` doesn't
-  check either of these itself, so if they're missing you'll see a raw
-  `gcloud` error (API-not-enabled or billing-not-configured) partway through.
+- A GCP project with billing linked (`gcloud billing projects link
+  YOUR_PROJECT_ID --billing-account=YOUR_BILLING_ACCOUNT_ID`) --
+  `provision_lab.py` doesn't check or fix this itself, so if it's missing
+  you'll see a raw `gcloud` billing-not-configured error partway through.
+  (The Firestore API itself doesn't need enabling by hand: `provision_lab.py`
+  calls `gcloud services enable firestore.googleapis.com` on every run,
+  before it tries to create anything -- confirmed necessary live, on a
+  brand-new project where `gcloud`'s own "enable it now?" prompt turned out
+  to default to declining even under `--quiet`.)
 - `gcloud` CLI, authenticated (`gcloud auth login`) against that project,
   with **more than just a Firestore-scoped role**. `provision_lab.py` also
   calls `gcloud projects add-iam-policy-binding` to grant the new SCRAM user
@@ -84,7 +87,12 @@ for how to use it as a nudge without giving away the fix.
   IAM Admin (paired with a Firestore admin role) all work.
 - Python 3.9+.
 
-### 2. Set up Python
+### 2. Get the code and set up Python
+
+```bash
+git clone https://github.com/csburchSD/smelab2026.git
+cd smelab2026
+```
 
 ```bash
 python3 -m venv venv
@@ -597,12 +605,31 @@ concurrent warm-up burst was, dropping p95 from ~900ms to ~60ms in that
 script's diagnostic).
 
 **Symptom (measured on `labdb1`):** SPIKE: wall 1.526s, p95 1268ms, max
-1510ms, 131 ops/sec. RAMP final stage (identical shape): wall 0.662s, p95
-464ms, max 644ms, 302 ops/sec — roughly 2x the throughput and a third of
-the tail latency, from ramping the *same* total concurrency up in stages
-instead of all at once. `--mode reads` reproduces the same shape for reads
-(SPIKE p95 1110ms/max 1245ms vs. RAMP p95 392ms/max 488ms), confirming the
-rule's read+write scope isn't just a write-side story here.
+1510ms, est. 31.5 ops/sec. RAMP final stage (identical shape): wall 0.662s,
+p95 464ms, max 644ms, est. 86.2 ops/sec — roughly 2.7x the throughput and a
+third of the tail latency, from ramping the *same* total concurrency up in
+stages instead of all at once. `--mode reads` reproduces the same shape for
+reads (SPIKE p95 1110ms/max 1245ms/est. 36.0 ops/sec vs. RAMP p95 392ms/max
+488ms/est. 102.0 ops/sec), confirming the rule's read+write scope isn't just
+a write-side story here.
+
+**Why "est. ops/sec" and not p50 or wall-clock, and a caveat shared with labs
+1 and 3:** this script hits the same reproducible ~5-10s single-op latency
+artifact documented under lab 1 and lab 3 below — a fixed cost the backend
+pays the first time real concurrent load touches a given region of the
+keyspace, not something either scenario here "does wrong." Live testing
+found p50 alone actually **flips direction** run to run here (it favored
+SPIKE, backwards from the lesson, in at least one clean run with no artifact
+contamination at all), because this lab's real effect — a spike queuing
+behind a not-yet-scaled range — shows up specifically as *tail* latency, not
+a uniform shift of the whole distribution. p95 held the correct direction
+(RAMP faster) across every run tried, contaminated or not, which is why
+`05_lab_traffic_scratch.py` derives its printed `est. ops/sec` column as
+`concurrency / p95` rather than `ops / wall-clock` (also one straggler op
+away from making a fast scenario look like it crawled) or a p50-based
+estimate. If a trainee's own run shows p50 disagreeing with p95 on which
+scenario "won," that's expected — trust p95 here, and feel free to have them
+rerun once to see it settle.
 
 **Fix:** don't let real traffic hit a new range at full concurrency on day
 one. Ramp up gradually (the literal 500/50/5 schedule in production), and

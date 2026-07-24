@@ -137,14 +137,19 @@ class _Heartbeat:
 
 
 def run(cmd, check=True):
-    """--quiet auto-accepts gcloud's own prompts (e.g. "API not enabled --
-    enable it now?" on a brand-new project), and stdin=DEVNULL is a second
-    line of defense: capture_output=True hides any prompt gcloud prints
-    (it goes into result.stderr, not the terminal), and without DEVNULL,
-    stdin is inherited from this process -- so an unanticipated prompt
-    would block forever on input the user can't see they need to give,
-    instead of failing fast with a visible error (observed directly: this
-    is exactly what happened on a fresh project before --quiet was added)."""
+    """--quiet answers gcloud's own interactive prompts with their default
+    instead of leaving them dangling -- e.g. its "API not enabled -- enable
+    it now? (y/N)" prompt on a brand-new project defaults to N, so it fails
+    fast with a visible SERVICE_DISABLED error rather than actually enabling
+    anything (confirmed directly: --quiet alone does NOT fix a disabled API,
+    which is why ensure_api_enabled() exists as a separate, explicit step).
+    stdin=DEVNULL is a second line of defense: capture_output=True hides any
+    prompt gcloud prints (it goes into result.stderr, not the terminal), and
+    without DEVNULL, stdin is inherited from this process -- so an
+    unanticipated prompt would block forever on input the user can't see
+    they need to give, instead of failing fast with a visible error
+    (observed directly: this is exactly what happened on a fresh project
+    before --quiet was added)."""
     if cmd and cmd[0] == "gcloud" and "--quiet" not in cmd:
         cmd = [cmd[0], "--quiet", *cmd[1:]]
     result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
@@ -167,6 +172,20 @@ def database_exists(project_id, database_id):
     return result.returncode == 0
 
 
+def ensure_api_enabled(project_id):
+    """A brand-new project has never called the Firestore API before, so it's
+    disabled by default -- `gcloud firestore databases create` fails with
+    SERVICE_DISABLED in that case. This isn't the "hang on an invisible
+    prompt" bug run()'s --quiet fixes -- confirmed directly: --quiet
+    suppresses gcloud's own "enable it now? (y/N)" prompt but defaults it to
+    N, so the command still fails, just fast and visibly instead of hanging.
+    So enable it explicitly and unconditionally up front -- a fast no-op if
+    it's already enabled, which it always will be when reusing an existing
+    database."""
+    print("Ensuring the Firestore API is enabled...")
+    run(["gcloud", "services", "enable", "firestore.googleapis.com", f"--project={project_id}"])
+
+
 def get_project_number(project_id):
     result = run(["gcloud", "projects", "describe", project_id, "--format=value(projectNumber)"])
     number = result.stdout.strip()
@@ -176,12 +195,18 @@ def get_project_number(project_id):
     return number
 
 
-def create_database(project_id, database_id, location, attempts=3):
+def create_database(project_id, database_id, location, attempts=6):
     """A database ID that was just deleted (e.g. a decommission_lab.py run
     moments ago) isn't immediately reusable -- gcloud returns
     FAILED_PRECONDITION with the exact cooldown left in its own error
     message. Parse that and retry instead of just dying, since
-    provision -> decommission -> provision is a normal cycle here."""
+    provision -> decommission -> provision is a normal cycle here.
+
+    Also retries on SERVICE_DISABLED: ensure_api_enabled() runs first, but
+    Google's own error text on this says enabling "can take a few minutes to
+    propagate" -- so a project that just had the API enabled for the first
+    time can still 403 here briefly even though enabling itself already
+    succeeded."""
     cmd = [
         "gcloud", "firestore", "databases", "create",
         f"--database={database_id}", f"--location={location}", f"--project={project_id}",
@@ -198,6 +223,12 @@ def create_database(project_id, database_id, location, attempts=3):
             wait_s = int(match.group(1)) + 5
             print(f"  '{database_id}' was just deleted and isn't reusable yet -- "
                   f"waiting {wait_s}s for the cooldown (attempt {attempt}/{attempts})...")
+            time.sleep(wait_s)
+            continue
+        if "SERVICE_DISABLED" in result.stderr and attempt < attempts:
+            wait_s = 20
+            print(f"  Firestore API was just enabled and hasn't finished propagating yet -- "
+                  f"waiting {wait_s}s (attempt {attempt}/{attempts})...")
             time.sleep(wait_s)
             continue
         print(result.stderr.strip(), file=sys.stderr)
@@ -440,6 +471,8 @@ def main():
         if confirm != "y":
             print("Aborted.")
             return
+
+    ensure_api_enabled(args.project_id)
 
     if not db_already_exists:
         create_database(args.project_id, args.database_id, args.location)
